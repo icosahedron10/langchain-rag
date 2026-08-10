@@ -1,0 +1,63 @@
+[project]
+name = "ragchat"
+version = "0.1.0"
+description = "Local single-user proof-of-concept chat API over an externally populated Qdrant corpus"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "litestar>=2.13,<3.0",
+    "uvicorn>=0.30",
+    "pydantic>=2.9,<3.0",
+    "pydantic-settings>=2.6,<3.0",
+    "openai>=1.60",
+    "langchain>=1.0,<2.0",
+    "langgraph>=1.0,<2.0",
+    "deepagents>=0.2",
+    "langchain-openai>=1.0,<2.0",
+    "langchain-qdrant>=0.2",
+    "langchain-huggingface>=0.3",
+    "langchain-community>=0.4",
+    "qdrant-client>=1.12",
+    "fastembed>=0.6",
+    "sentence-transformers>=3.0",
+    "langchain-classic (>=1.0)",
+]
+
+[tool.poetry]
+packages = [{ include = "ragchat", from = "src" }]
+
+[tool.poetry.group.ui.dependencies]
+streamlit = ">=1.40"
+httpx = ">=0.27"
+httpx-sse = ">=0.4"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.3"
+pytest-asyncio = ">=0.24"
+httpx = ">=0.27"
+ruff = ">=0.6"
+mypy = ">=1.11"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "ui"]
+extend-exclude = ["HANDOFF.md", "docs/api-notes"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = false
