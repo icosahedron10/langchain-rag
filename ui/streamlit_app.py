@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import contextlib
 import json
 import os
 
@@ -41,8 +40,13 @@ def _ensure_session(client: httpx.Client) -> str:
 def _reset_chat() -> None:
     session_id = st.session_state.api_session_id
     if session_id is not None:
-        with contextlib.suppress(httpx.HTTPError):
-            httpx.delete(f"{API_URL}/sessions/{session_id}", timeout=10)
+        try:
+            response = httpx.delete(f"{API_URL}/sessions/{session_id}", timeout=10)
+            if response.status_code != 404:
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            st.error(f"Could not clear chat: {exc}")
+            return
     st.session_state.api_session_id = None
     st.session_state.messages = []
     st.session_state.busy = False

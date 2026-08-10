@@ -16,6 +16,9 @@ IMAGE_MEDIA_TYPES = {
     ".webp": "image/webp",
 }
 
+MAX_COLLECTED_ARTIFACTS = 20
+MAX_COLLECTED_ARTIFACT_BYTES = 20_000_000
+
 # Relative path -> (mtime_ns, size) fingerprint.
 WorkspaceSnapshot = dict[str, tuple[int, int]]
 
@@ -54,22 +57,40 @@ def collect_image_artifacts(
     workspace: Path,
     before: WorkspaceSnapshot,
     max_bytes: int,
+    *,
+    max_count: int = MAX_COLLECTED_ARTIFACTS,
+    max_total_bytes: int = MAX_COLLECTED_ARTIFACT_BYTES,
 ) -> tuple[list[ArtifactEvent], list[str]]:
-    """Return changed images and names of oversized or raced regular files.
+    """Return changed images within per-file and aggregate collection budgets.
 
     Unsafe and unreadable paths are omitted. Artifact names are always
     workspace-relative; physical host paths are never exposed.
     """
+    if max_count < 1:
+        raise ValueError("max_count must be at least 1")
+    if max_total_bytes < 1:
+        raise ValueError("max_total_bytes must be at least 1")
+
     artifacts: list[ArtifactEvent] = []
     skipped: list[str] = []
+    total_bytes = 0
     for name, fingerprint in snapshot_workspace(workspace).items():
         if before.get(name) == fingerprint:
             continue
+        if len(artifacts) >= max_count:
+            skipped.append(name)
+            continue
+        remaining_bytes = max_total_bytes - total_bytes
+        if remaining_bytes <= 0:
+            skipped.append(name)
+            continue
+        read_limit = min(max_bytes, remaining_bytes)
         if _SECURE_DIR_FDS:
-            data, was_skipped = _read_with_dir_fds(workspace, name, fingerprint, max_bytes)
+            data, was_skipped = _read_with_dir_fds(workspace, name, fingerprint, read_limit)
         else:
-            data, was_skipped = _read_with_lstat(workspace, name, fingerprint, max_bytes)
+            data, was_skipped = _read_with_lstat(workspace, name, fingerprint, read_limit)
         if data is not None:
+            total_bytes += len(data)
             artifacts.append(
                 ArtifactEvent(
                     name=name,

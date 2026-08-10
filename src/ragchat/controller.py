@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from litestar import Controller, Request, Response, delete, get, post
+from litestar.background_tasks import BackgroundTask
 from litestar.datastructures import State
 from litestar.response import ServerSentEvent, ServerSentEventMessage
 from litestar.status_codes import HTTP_200_OK, HTTP_404_NOT_FOUND, HTTP_409_CONFLICT
@@ -66,13 +67,19 @@ class AgentController(Controller):
         events = await state.manager.stream_chat(session_id, data.message)
 
         async def messages() -> AsyncIterator[ServerSentEventMessage]:
-            async for event in events:
-                yield ServerSentEventMessage(
-                    data=event.model_dump_json(),
-                    event=event.type,
-                )
+            try:
+                async for event in events:
+                    yield ServerSentEventMessage(
+                        data=event.model_dump_json(),
+                        event=event.type,
+                    )
+            finally:
+                await events.aclose()
 
-        return ServerSentEvent(messages())
+        return ServerSentEvent(
+            messages(),
+            background=BackgroundTask(events.aclose),
+        )
 
     @delete("/sessions/{session_id:str}")
     async def delete_session(self, state: State, session_id: str) -> None:

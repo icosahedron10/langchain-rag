@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from ragchat.domain import SandboxUnavailableError
 from ragchat.sandbox.docker_session import (
     DockerSandboxSession,
     assert_docker_available,
+    run_docker_cli,
 )
 
 
@@ -31,8 +33,9 @@ def settings(**overrides: Any) -> Settings:
 
 class RecordingRunner:
     def __init__(self) -> None:
-        self.calls: list[tuple[list[str], float]] = []
+        self.calls: list[tuple[list[str], float, int]] = []
         self.exec_result: tuple[int, bytes, bytes] = (0, b"stdout\n", b"stderr")
+        self.cleanup_result: tuple[int, bytes, bytes] = (0, b"", b"")
         self.run_result: tuple[int, bytes, bytes] = (0, b"container-id", b"")
         self.rm_result: tuple[int, bytes, bytes] = (0, b"", b"")
         self.rm_error: OSError | TimeoutError | None = None
@@ -41,11 +44,14 @@ class RecordingRunner:
         self,
         args: list[str],
         timeout: float,
+        max_output_bytes: int,
     ) -> tuple[int, bytes, bytes]:
-        self.calls.append((args, timeout))
+        self.calls.append((args, timeout, max_output_bytes))
         if args[0] == "run":
             return self.run_result
         if args[0] == "exec":
+            if "--env" not in args:
+                return self.cleanup_result
             return self.exec_result
         if args[0] == "rm":
             if self.rm_error is not None:
@@ -54,10 +60,104 @@ class RecordingRunner:
         return 0, b"", b""
 
 
+def command_calls(runner: RecordingRunner) -> list[tuple[list[str], float, int]]:
+    return [call for call in runner.calls if call[0][0] == "exec" and "--env" in call[0]]
+
+
+def cleanup_calls(runner: RecordingRunner) -> list[tuple[list[str], float, int]]:
+    return [call for call in runner.calls if call[0][0] == "exec" and "--env" not in call[0]]
+
+
+class FakeDockerProcess:
+    def __init__(self, stdout: bytes, stderr: bytes, *, running: bool = False) -> None:
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.stdout.feed_data(stdout)
+        self.stderr.feed_data(stderr)
+        self.returncode: int | None = None if running else 0
+        self.killed = False
+        self._done = asyncio.Event()
+        if running:
+            return
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+        self._done.set()
+
+    async def wait(self) -> int:
+        await self._done.wait()
+        assert self.returncode is not None
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+        self._done.set()
+
+
+@pytest.mark.asyncio
+async def test_docker_cli_continuously_drains_but_retains_bounded_pipe_prefixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = FakeDockerProcess(b"a" * 1_000_000, b"b" * 1_000_000)
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> FakeDockerProcess:
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    code, stdout, stderr = await run_docker_cli(["version"], 1.0, 128)
+
+    assert code == 0
+    assert len(stdout) == 128
+    assert len(stderr) == 128
+    assert stdout.endswith(docker_session_module._PIPE_TRUNCATION_MARKER)
+    assert stderr.endswith(docker_session_module._PIPE_TRUNCATION_MARKER)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_docker_cli_kills_process_and_finishes_pipe_drains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = FakeDockerProcess(b"partial stdout", b"partial stderr", running=True)
+    created = asyncio.Event()
+
+    async def create_subprocess(*_args: object, **_kwargs: object) -> FakeDockerProcess:
+        created.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    task = asyncio.create_task(run_docker_cli(["exec"], 60.0, 128))
+    await created.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.killed is True
+
+
+@pytest.mark.parametrize("uid, gid", [(0, 1000), (1000, 0)])
+def test_root_workspace_identity_is_rejected(uid: int, gid: int) -> None:
+    with pytest.raises(SandboxUnavailableError, match="root UID or GID"):
+        docker_session_module._format_workspace_owner(uid, gid)
+
+
+def test_non_root_workspace_identity_is_numeric() -> None:
+    assert docker_session_module._format_workspace_owner(1234, 5678) == "1234:5678"
+
+
 @pytest.mark.asyncio
 async def test_container_is_lazy_hardened_and_receives_only_the_workspace_mount(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        docker_session_module,
+        "_numeric_workspace_owner",
+        lambda _workspace: "1234:5678",
+    )
     configured = settings()
     runner = RecordingRunner()
     workspace = tmp_path / "session-workspace"
@@ -73,10 +173,19 @@ async def test_container_is_lazy_hardened_and_receives_only_the_workspace_mount(
     assert first.output == "stdout\nstderr"
     assert second.output == "stdout\nstderr"
     assert workspace.is_dir()
-    assert [args[0] for args, _ in runner.calls] == ["run", "exec", "exec"]
+    assert [args[0] for args, _, _ in runner.calls] == [
+        "run",
+        "exec",
+        "exec",
+        "exec",
+        "exec",
+    ]
 
-    run_args, run_timeout = runner.calls[0]
+    run_args, run_timeout, run_capture_limit = runner.calls[0]
     assert run_timeout == 60.0
+    assert run_capture_limit > 0
+    assert "--init" in run_args
+    assert run_args[run_args.index("--user") + 1] == "1234:5678"
     assert run_args[run_args.index("--network") + 1] == "none"
     assert "--read-only" in run_args
     assert run_args[run_args.index("--cap-drop") + 1] == "ALL"
@@ -97,25 +206,49 @@ async def test_container_is_lazy_hardened_and_receives_only_the_workspace_mount(
     assert "qdrant-secret" not in serialized_args
     assert "vllm-secret" not in serialized_args
 
-    assert runner.calls[1] == (
-        [
-            "exec",
-            "ragchat-sandbox-abc123",
-            "/bin/sh",
-            "-lc",
-            "printf first",
-        ],
-        float(configured.sandbox_command_timeout_seconds),
-    )
-    assert runner.calls[2][0][-1] == "printf second"
+    first_args, first_timeout, first_capture_limit = command_calls(runner)[0]
+    assert first_args[:5] == ["exec", "--user", "1234:5678", "--env", first_args[4]]
+    token = first_args[4].removeprefix("RAGCHAT_EXEC_TOKEN=")
+    assert len(token) == 32
+    assert first_args[5:12] == [
+        "ragchat-sandbox-abc123",
+        "/usr/bin/timeout",
+        "--signal=TERM",
+        "--kill-after=1s",
+        f"{configured.sandbox_command_timeout_seconds}s",
+        "/bin/sh",
+        "-lc",
+    ]
+    assert first_args[-1] == "printf first"
+    assert first_timeout == configured.sandbox_command_timeout_seconds + 5.0
+    assert first_capture_limit >= configured.sandbox_output_limit_chars * 4
+    assert command_calls(runner)[1][0][-1] == "printf second"
+
+    first_cleanup_args = cleanup_calls(runner)[0][0]
+    assert first_cleanup_args[:4] == [
+        "exec",
+        "--user",
+        "1234:5678",
+        "ragchat-sandbox-abc123",
+    ]
+    assert first_cleanup_args[-1] == token
+    assert "pid in (1, current)" in first_cleanup_args[-2]
 
     await session.close()
     await session.close()
 
-    assert [args[0] for args, _ in runner.calls] == ["run", "exec", "exec", "rm"]
+    assert [args[0] for args, _, _ in runner.calls] == [
+        "run",
+        "exec",
+        "exec",
+        "exec",
+        "exec",
+        "rm",
+    ]
     assert runner.calls[-1] == (
         ["rm", "--force", "ragchat-sandbox-abc123"],
         30.0,
+        runner.calls[0][2],
     )
     assert not workspace.exists()
 
@@ -137,13 +270,13 @@ async def test_failed_container_removal_is_reported_and_can_be_retried(
         await session.close()
 
     assert not workspace.exists()
-    assert [args[0] for args, _ in runner.calls].count("rm") == 1
+    assert [args[0] for args, _, _ in runner.calls].count("rm") == 1
 
     runner.rm_result = (0, b"", b"")
     await session.close()
     await session.close()
 
-    assert [args[0] for args, _ in runner.calls].count("rm") == 2
+    assert [args[0] for args, _, _ in runner.calls].count("rm") == 2
 
 
 @pytest.mark.asyncio
@@ -169,7 +302,7 @@ async def test_container_removal_runner_errors_are_reported_and_retryable(
     runner.rm_error = None
     await session.close()
 
-    assert [args[0] for args, _ in runner.calls].count("rm") == 2
+    assert [args[0] for args, _, _ in runner.calls].count("rm") == 2
 
 
 @pytest.mark.asyncio
@@ -198,12 +331,12 @@ async def test_workspace_cleanup_failure_is_reported_and_can_be_retried(
             await session.close()
 
     assert workspace.exists()
-    assert [args[0] for args, _ in runner.calls].count("rm") == 1
+    assert [args[0] for args, _, _ in runner.calls].count("rm") == 1
 
     await session.close()
 
     assert not workspace.exists()
-    assert [args[0] for args, _ in runner.calls].count("rm") == 1
+    assert [args[0] for args, _, _ in runner.calls].count("rm") == 1
 
 
 @pytest.mark.asyncio
@@ -236,9 +369,82 @@ async def test_execute_reports_timeout_and_output_truncation(tmp_path: Path) -> 
     result = await session.execute("long command")
 
     assert result.exit_code == 124
+    assert result.truncated is True
     assert result.output.startswith("Command timed out after 7s.")
     assert "output truncated at 8 characters" in result.output
-    assert runner.calls[1][1] == 7.0
+    assert command_calls(runner)[0][1] == 12.0
+    assert "7s" in command_calls(runner)[0][0]
+    await session.close()
+
+
+@pytest.mark.asyncio
+async def test_requested_timeout_is_positive_and_capped_by_configuration(
+    tmp_path: Path,
+) -> None:
+    configured = settings(sandbox_command_timeout_seconds=7)
+    runner = RecordingRunner()
+    session = DockerSandboxSession(configured, "bounded-timeout", tmp_path / "work", runner)
+
+    await session.execute("shorter", timeout=3)
+    await session.execute("capped", timeout=99)
+
+    first_args, first_outer_timeout, _ = command_calls(runner)[0]
+    second_args, second_outer_timeout, _ = command_calls(runner)[1]
+    assert "3s" in first_args
+    assert first_outer_timeout == 8.0
+    assert "7s" in second_args
+    assert second_outer_timeout == 12.0
+    with pytest.raises(ValueError, match="must be positive"):
+        await session.execute("invalid", timeout=0)
+    await session.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_command_waits_for_token_scoped_container_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        docker_session_module,
+        "_numeric_workspace_owner",
+        lambda _workspace: "1234:5678",
+    )
+    main_started = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def blocking_runner(
+        args: list[str], _timeout: float, _max_output_bytes: int
+    ) -> tuple[int, bytes, bytes]:
+        calls.append(args)
+        if args[0] == "run":
+            return 0, b"container", b""
+        if args[0] == "exec" and "--env" in args:
+            main_started.set()
+            await asyncio.Future()
+        if args[0] == "exec":
+            await asyncio.sleep(0)
+            cleanup_finished.set()
+            return 0, b"", b""
+        return 0, b"", b""
+
+    session = DockerSandboxSession(
+        settings(),
+        "cancelled",
+        tmp_path / "work",
+        runner=blocking_runner,
+    )
+    task = asyncio.create_task(session.execute("long-running"))
+    await main_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cleanup_finished.is_set()
+    command_args = next(args for args in calls if "--env" in args)
+    cleanup_args = next(args for args in calls if args[0] == "exec" and "--env" not in args)
+    assert cleanup_args[-1] == command_args[4].removeprefix("RAGCHAT_EXEC_TOKEN=")
     await session.close()
 
 
@@ -251,29 +457,36 @@ async def test_failed_container_start_raises_clear_error_without_exec(tmp_path: 
     with pytest.raises(SandboxUnavailableError, match="image missing"):
         await session.execute("never runs")
 
-    assert [args[0] for args, _ in runner.calls] == ["run"]
+    assert [args[0] for args, _, _ in runner.calls] == ["run"]
     await session.close()
 
 
 @pytest.mark.asyncio
 async def test_docker_availability_probe_accepts_success_and_rejects_failures() -> None:
-    calls: list[tuple[list[str], float]] = []
+    calls: list[tuple[list[str], float, int]] = []
 
-    async def success(args: list[str], timeout: float) -> tuple[int, bytes, bytes]:
-        calls.append((args, timeout))
+    async def success(
+        args: list[str], timeout: float, max_output_bytes: int
+    ) -> tuple[int, bytes, bytes]:
+        calls.append((args, timeout, max_output_bytes))
         return 0, b"27.0", b""
 
     await assert_docker_available(success)
 
-    assert calls == [(["version", "--format", "{{.Server.Version}}"], 15.0)]
+    assert calls[0][:2] == (["version", "--format", "{{.Server.Version}}"], 15.0)
+    assert calls[0][2] > 0
 
-    async def daemon_down(_args: list[str], _timeout: float) -> tuple[int, bytes, bytes]:
+    async def daemon_down(
+        _args: list[str], _timeout: float, _max_output_bytes: int
+    ) -> tuple[int, bytes, bytes]:
         return 1, b"", b"daemon unavailable"
 
     with pytest.raises(SandboxUnavailableError, match="daemon unavailable"):
         await assert_docker_available(daemon_down)
 
-    async def cli_missing(_args: list[str], _timeout: float) -> tuple[int, bytes, bytes]:
+    async def cli_missing(
+        _args: list[str], _timeout: float, _max_output_bytes: int
+    ) -> tuple[int, bytes, bytes]:
         raise OSError("docker not found")
 
     with pytest.raises(SandboxUnavailableError, match="docker CLI could not be run"):

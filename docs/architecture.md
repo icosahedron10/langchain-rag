@@ -126,7 +126,12 @@ on first execution. File tools see virtual `/`, while shell commands run in
 The container has no network, a read-only root filesystem, all capabilities
 dropped, `no-new-privileges`, CPU/memory/PID/time/output limits, and exactly one
 read-write mount: its session workspace. It receives neither the corpus nor
-Qdrant credentials. Before and after execution, the backend snapshots regular
+Qdrant credentials. On Linux, container creation and command execution use the
+workspace owner's numeric UID:GID; deployments should run the API as a
+dedicated non-root host user. GNU `timeout` owns each command process group,
+with a small outer Docker CLI grace and a token-scoped cleanup pass for escaped
+background processes. CLI pipes are drained continuously into bounded capture
+buffers. Before and after execution, the backend snapshots regular
 PNG/JPEG/WebP files without following links. Changed images within the raw-byte
 cap become inline base64 `artifact` events with workspace-relative names;
 oversized or raced files are skipped, and host paths are never exposed.

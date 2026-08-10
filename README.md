@@ -158,6 +158,15 @@ container has no network, a read-only root filesystem, dropped capabilities,
 mounted read/write at `/workspace`. The corpus, Qdrant credentials, and model
 credentials are never mounted or injected.
 
+On Linux, run the API as a dedicated non-root host user with Docker access.
+Docker runs both the container and each command with that workspace owner's
+numeric UID:GID, which keeps the bind mount writable without granting the
+sandbox broader host-file access. Sandbox launch refuses a root-owned workspace
+instead of overriding the image's non-root user with `--user 0:0`. Each command
+is wrapped in an in-container GNU `timeout` process group; the Docker CLI gets
+only a small cleanup grace, and stdout/stderr are drained continuously while
+retained output remains bounded by the configured cap.
+
 New or modified PNG, JPEG, and WebP files in the workspace stream inline as
 SSE artifacts. Files larger than `ARTIFACT_MAX_BYTES` raw bytes are skipped and
 reported in progress; no filesystem paths or artifact-download endpoints are

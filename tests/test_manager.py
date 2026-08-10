@@ -7,10 +7,12 @@ from typing import Any, cast
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from litestar.datastructures import State
 
 import ragchat.manager as manager_module
 from conftest import FakePipeline, ScriptedChatModel
 from ragchat.config import SandboxMode, Settings
+from ragchat.controller import AgentController, ChatRequest
 from ragchat.domain import (
     ArtifactEvent,
     DoneEvent,
@@ -36,10 +38,16 @@ def settings(*, sandbox_mode: SandboxMode = SandboxMode.DISABLED) -> Settings:
 
 
 class RecordingSaver:
-    def __init__(self) -> None:
+    def __init__(self, failures_remaining: int = 0) -> None:
         self.deleted: list[str] = []
+        self.attempted: list[str] = []
+        self.failures_remaining = failures_remaining
 
     async def adelete_thread(self, session_id: str) -> None:
+        self.attempted.append(session_id)
+        if self.failures_remaining:
+            self.failures_remaining -= 1
+            raise RuntimeError("checkpoint deletion failed")
         self.deleted.append(session_id)
 
 
@@ -73,9 +81,13 @@ class ScriptedOrchestrator:
 @dataclass
 class RecordingSandboxSession:
     close_count: int = 0
+    failures_remaining: int = 0
 
     async def close(self) -> None:
         self.close_count += 1
+        if self.failures_remaining:
+            self.failures_remaining -= 1
+            raise RuntimeError("sandbox close failed")
 
 
 @dataclass
@@ -268,6 +280,61 @@ async def test_lock_is_acquired_before_return_and_released_when_stream_closes_ea
 
 
 @pytest.mark.asyncio
+async def test_unstarted_stream_close_releases_the_preacquired_session_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = ScriptedOrchestrator(
+        [((), "custom", {"type": "progress", "text": "never consumed"})]
+    )
+    manager = make_manager(monkeypatch, orchestrator)
+    session_id = manager.create_session()
+
+    stream = await manager.stream_chat(session_id, "abandoned request")
+    assert manager._sessions[session_id].lock.locked() is True
+
+    await stream.aclose()
+    await stream.aclose()
+
+    assert manager._sessions[session_id].lock.locked() is False
+    assert orchestrator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_immediate_asgi_disconnect_closes_unstarted_manager_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = ScriptedOrchestrator(
+        [((), "custom", {"type": "progress", "text": "never consumed"})]
+    )
+    manager = make_manager(monkeypatch, orchestrator)
+    session_id = manager.create_session()
+    response = await AgentController.chat.fn(
+        None,
+        State({"manager": manager}),
+        session_id,
+        ChatRequest(message="disconnect immediately"),
+    )
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    asgi_response = response.to_asgi_response(None, cast("Any", None))
+    await asgi_response(
+        cast("Any", {"type": "http"}),
+        cast("Any", receive),
+        cast("Any", send),
+    )
+
+    assert sent[0]["type"] == "http.response.start"
+    assert orchestrator.calls == []
+    assert manager._sessions[session_id].lock.locked() is False
+
+
+@pytest.mark.asyncio
 async def test_different_sessions_can_hold_active_streams_concurrently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -366,6 +433,84 @@ async def test_delete_closes_owned_sandbox_and_deletes_checkpoint(
 
 
 @pytest.mark.asyncio
+async def test_failed_checkpoint_deletion_retains_busy_session_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handles: dict[str, RecordingHandle] = {}
+
+    def factory(session_id: str) -> RecordingHandle:
+        handle = RecordingHandle(RecordingSandboxSession())
+        handles[session_id] = handle
+        return handle
+
+    saver = RecordingSaver(failures_remaining=1)
+    manager = make_manager(
+        monkeypatch,
+        ScriptedOrchestrator(),
+        sandbox_mode=SandboxMode.DOCKER,
+        handle_factory=factory,
+        saver=saver,
+    )
+    session_id = manager.create_session()
+
+    with pytest.raises(RuntimeError, match="checkpoint deletion failed"):
+        await manager.delete_session(session_id)
+
+    retained = manager._sessions[session_id]
+    assert retained.deleting is True
+    assert retained.sandbox_closed is True
+    assert retained.checkpoint_deleted is False
+    assert retained.lock.locked() is False
+    assert handles[session_id].session.close_count == 1
+    assert saver.attempted == [session_id]
+    with pytest.raises(SessionBusyError):
+        await manager.stream_chat(session_id, "must not route")
+
+    await manager.delete_session(session_id)
+
+    assert handles[session_id].session.close_count == 1
+    assert saver.attempted == [session_id, session_id]
+    assert saver.deleted == [session_id]
+    assert session_id not in manager._sessions
+
+
+@pytest.mark.asyncio
+async def test_failed_sandbox_close_retains_session_after_checkpoint_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handles: dict[str, RecordingHandle] = {}
+
+    def factory(session_id: str) -> RecordingHandle:
+        handle = RecordingHandle(RecordingSandboxSession(failures_remaining=1))
+        handles[session_id] = handle
+        return handle
+
+    saver = RecordingSaver()
+    manager = make_manager(
+        monkeypatch,
+        ScriptedOrchestrator(),
+        sandbox_mode=SandboxMode.DOCKER,
+        handle_factory=factory,
+        saver=saver,
+    )
+    session_id = manager.create_session()
+
+    with pytest.raises(RuntimeError, match="sandbox close failed"):
+        await manager.delete_session(session_id)
+
+    retained = manager._sessions[session_id]
+    assert retained.sandbox_closed is False
+    assert retained.checkpoint_deleted is True
+    assert saver.attempted == [session_id]
+
+    await manager.delete_session(session_id)
+
+    assert handles[session_id].session.close_count == 2
+    assert saver.attempted == [session_id]
+    assert session_id not in manager._sessions
+
+
+@pytest.mark.asyncio
 async def test_shutdown_closes_and_forgets_every_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -391,6 +536,43 @@ async def test_shutdown_closes_and_forgets_every_session(
     assert manager._sessions == {}
     assert saver.deleted == session_ids
     assert all(handles[session_id].session.close_count == 1 for session_id in session_ids)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_retains_failed_sessions_and_retries_only_unfinished_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handles: dict[str, RecordingHandle] = {}
+
+    def factory(session_id: str) -> RecordingHandle:
+        handle = RecordingHandle(RecordingSandboxSession())
+        handles[session_id] = handle
+        return handle
+
+    saver = RecordingSaver(failures_remaining=1)
+    manager = make_manager(
+        monkeypatch,
+        ScriptedOrchestrator(),
+        sandbox_mode=SandboxMode.DOCKER,
+        handle_factory=factory,
+        saver=saver,
+    )
+    first_id, second_id = (manager.create_session() for _ in range(2))
+
+    with pytest.raises(ExceptionGroup, match="Failed to fully shut down"):
+        await manager.shutdown()
+
+    assert list(manager._sessions) == [first_id]
+    assert manager._sessions[first_id].deleting is True
+    assert handles[first_id].session.close_count == 1
+    assert handles[second_id].session.close_count == 1
+    assert saver.deleted == [second_id]
+
+    await manager.shutdown()
+
+    assert manager._sessions == {}
+    assert handles[first_id].session.close_count == 1
+    assert saver.deleted == [second_id, first_id]
 
 
 def test_session_ids_are_unique_uuid_hex(

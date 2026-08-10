@@ -78,6 +78,40 @@ def test_file_growing_past_cap_during_bounded_read_is_skipped(
     assert observed_limits == [6]
 
 
+def test_aggregate_count_budget_skips_excess_images(tmp_path: Path) -> None:
+    for name in ("one.png", "three.png", "two.png"):
+        (tmp_path / name).write_bytes(b"x")
+
+    artifacts, skipped = collect_image_artifacts(
+        tmp_path,
+        {},
+        max_bytes=10,
+        max_count=2,
+        max_total_bytes=100,
+    )
+
+    assert [artifact.name for artifact in artifacts] == ["one.png", "three.png"]
+    assert skipped == ["two.png"]
+
+
+def test_aggregate_byte_budget_bounds_individually_under_cap_images(tmp_path: Path) -> None:
+    (tmp_path / "one.png").write_bytes(b"1234")
+    (tmp_path / "three.png").write_bytes(b"12")
+    (tmp_path / "two.png").write_bytes(b"5678")
+
+    artifacts, skipped = collect_image_artifacts(
+        tmp_path,
+        {},
+        max_bytes=5,
+        max_count=10,
+        max_total_bytes=6,
+    )
+
+    assert [artifact.name for artifact in artifacts] == ["one.png", "three.png"]
+    assert [base64.b64decode(artifact.data) for artifact in artifacts] == [b"1234", b"12"]
+    assert skipped == ["two.png"]
+
+
 def _make_symlink_or_skip(
     link: Path,
     target: Path,

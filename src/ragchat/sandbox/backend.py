@@ -112,8 +112,12 @@ class SessionRoutingBackend(SandboxBackendProtocol):
         timeout: int | None = None,
     ) -> ExecuteResponse:
         handle = self._handle()
+        configured_timeout = handle.settings.sandbox_command_timeout_seconds
+        if timeout is not None and timeout < 1:
+            raise ValueError("sandbox command timeout must be positive")
+        effective_timeout = min(timeout or configured_timeout, configured_timeout)
         before = snapshot_workspace(handle.session.workspace)
-        result = await handle.session.execute(command)
+        result = await handle.session.execute(command, timeout=effective_timeout)
         artifacts, skipped = collect_image_artifacts(
             handle.session.workspace,
             before,
@@ -127,8 +131,15 @@ class SessionRoutingBackend(SandboxBackendProtocol):
             writer(
                 {
                     "type": "progress",
-                    "text": f"Skipped large image {name} (> size cap)",
+                    "text": (
+                        f"Skipped image artifact {name} "
+                        "(collection limit or concurrent file change)"
+                    ),
                 }
             )
 
-        return ExecuteResponse(output=result.output, exit_code=result.exit_code)
+        return ExecuteResponse(
+            output=result.output,
+            exit_code=result.exit_code,
+            truncated=result.truncated,
+        )

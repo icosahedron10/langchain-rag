@@ -15,12 +15,17 @@ from ragchat.sandbox.backend import SessionRoutingBackend, SessionSandboxHandle
 from ragchat.sandbox.docker_session import DockerSandboxSession, ExecResult
 
 
-def settings(*, artifact_max_bytes: int = 5_000_000) -> Settings:
+def settings(
+    *,
+    artifact_max_bytes: int = 5_000_000,
+    sandbox_command_timeout_seconds: int = 60,
+) -> Settings:
     return Settings(
         vllm_base_url="http://vllm.test/v1",
         vllm_model="test-model",
         qdrant_collection="test-corpus",
         artifact_max_bytes=artifact_max_bytes,
+        sandbox_command_timeout_seconds=sandbox_command_timeout_seconds,
         _env_file=None,
     )
 
@@ -162,16 +167,70 @@ def test_is_sandbox_protocol_with_constant_id_and_no_sync_execution() -> None:
 class ArtifactProducingSession:
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
-        self.commands: list[str] = []
+        self.commands: list[tuple[str, int | None]] = []
 
-    async def execute(self, command: str) -> ExecResult:
-        self.commands.append(command)
+    async def execute(self, command: str, *, timeout: int | None = None) -> ExecResult:
+        self.commands.append((command, timeout))
         (self.workspace / "changed.png").write_bytes(b"new!")
         chart_dir = self.workspace / "charts"
         chart_dir.mkdir()
         (chart_dir / "new.webp").write_bytes(b"webp")
         (self.workspace / "large.jpg").write_bytes(b"123456")
         return ExecResult(exit_code=9, output="combined output")
+
+
+class RecordingExecSession:
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace
+        self.timeouts: list[int | None] = []
+
+    async def execute(self, _command: str, *, timeout: int | None = None) -> ExecResult:
+        self.timeouts.append(timeout)
+        return ExecResult(exit_code=0, output="bounded", truncated=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("requested", "expected"), [(None, 7), (3, 3), (99, 7)])
+async def test_aexecute_propagates_positive_timeout_capped_by_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    requested: int | None,
+    expected: int,
+) -> None:
+    session = RecordingExecSession(tmp_path)
+    handle = SessionSandboxHandle(
+        session=cast("DockerSandboxSession", session),
+        files=FilesystemBackend(root_dir=tmp_path, virtual_mode=True),
+        settings=settings(sandbox_command_timeout_seconds=7),
+    )
+    set_thread_id(monkeypatch, {"thread_id": "timeout-session"})
+    monkeypatch.setattr(backend_module, "get_stream_writer", lambda: lambda _event: None)
+    backend = SessionRoutingBackend(lambda _: handle)
+
+    response = await backend.aexecute("bounded command", timeout=requested)
+
+    assert session.timeouts == [expected]
+    assert response == ExecuteResponse(output="bounded", exit_code=0, truncated=True)
+
+
+@pytest.mark.asyncio
+async def test_aexecute_rejects_non_positive_timeout_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = RecordingExecSession(tmp_path)
+    handle = SessionSandboxHandle(
+        session=cast("DockerSandboxSession", session),
+        files=FilesystemBackend(root_dir=tmp_path, virtual_mode=True),
+        settings=settings(sandbox_command_timeout_seconds=7),
+    )
+    set_thread_id(monkeypatch, {"thread_id": "timeout-session"})
+    backend = SessionRoutingBackend(lambda _: handle)
+
+    with pytest.raises(ValueError, match="must be positive"):
+        await backend.aexecute("invalid", timeout=0)
+
+    assert session.timeouts == []
 
 
 @pytest.mark.asyncio
@@ -196,7 +255,7 @@ async def test_aexecute_streams_changed_artifacts_and_skipped_progress_without_h
     response = await backend.aexecute("make images", timeout=17)
 
     assert response == ExecuteResponse(output="combined output", exit_code=9)
-    assert session.commands == ["make images"]
+    assert session.commands == [("make images", 17)]
     assert events == [
         {
             "type": "artifact",
@@ -212,7 +271,9 @@ async def test_aexecute_streams_changed_artifacts_and_skipped_progress_without_h
         },
         {
             "type": "progress",
-            "text": "Skipped large image large.jpg (> size cap)",
+            "text": (
+                "Skipped image artifact large.jpg (collection limit or concurrent file change)"
+            ),
         },
     ]
     assert "unchanged.png" not in repr(events)

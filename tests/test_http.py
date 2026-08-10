@@ -7,10 +7,12 @@ from collections.abc import AsyncIterator
 
 import pytest
 from litestar import Litestar
+from litestar.datastructures import State
 from litestar.testing import TestClient
 
 from ragchat.app import create_app
 from ragchat.config import ModelBackend, SandboxMode, Settings
+from ragchat.controller import AgentController, ChatRequest
 from ragchat.domain import (
     ArtifactEvent,
     DomainEvent,
@@ -23,6 +25,32 @@ from ragchat.domain import (
 )
 
 
+class FakeEventStream(AsyncIterator[DomainEvent]):
+    def __init__(self, events: list[DomainEvent]) -> None:
+        self._events = iter(events)
+        self.iteration_count = 0
+        self.close_count = 0
+        self.closed = False
+
+    def __aiter__(self) -> FakeEventStream:
+        return self
+
+    async def __anext__(self) -> DomainEvent:
+        if self.closed:
+            raise StopAsyncIteration
+        self.iteration_count += 1
+        try:
+            return next(self._events)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+    async def aclose(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.close_count += 1
+
+
 class FakeManager:
     """Small transport-level fake; no agent or external service is constructed."""
 
@@ -32,6 +60,7 @@ class FakeManager:
         self.delete_error: Exception | None = None
         self.create_calls = 0
         self.chat_calls: list[tuple[str, str]] = []
+        self.streams: list[FakeEventStream] = []
         self.delete_calls: list[str] = []
         self.shutdown_calls = 0
 
@@ -48,11 +77,9 @@ class FakeManager:
         if self.stream_error is not None:
             raise self.stream_error
 
-        async def stream() -> AsyncIterator[DomainEvent]:
-            for event in self.events:
-                yield event
-
-        return stream()
+        stream = FakeEventStream(self.events)
+        self.streams.append(stream)
+        return stream
 
     async def delete_session(self, session_id: str) -> None:
         self.delete_calls.append(session_id)
@@ -166,6 +193,7 @@ def test_chat_serializes_every_domain_event_as_sse(settings: Settings) -> None:
         assert response.headers["x-accel-buffering"] == "no"
 
     assert manager.chat_calls == [("session-1", "question")]
+    assert manager.streams[0].close_count == 1
     assert len(lines) == 3 * len(manager.events)
     for index, event in enumerate(manager.events):
         offset = index * 3
@@ -173,6 +201,27 @@ def test_chat_serializes_every_domain_event_as_sse(settings: Settings) -> None:
         assert lines[offset + 1] == f"data: {event.model_dump_json()}"
         assert json.loads(lines[offset + 1].removeprefix("data: ")) == event.model_dump()
         assert lines[offset + 2] == ""
+
+
+@pytest.mark.asyncio
+async def test_chat_response_background_closes_a_never_iterated_stream() -> None:
+    manager = FakeManager()
+    manager.events = [ProgressEvent(text="would block if consumed")]
+
+    response = await AgentController.chat.fn(
+        None,
+        State({"manager": manager}),
+        "session-1",
+        ChatRequest(message="question"),
+    )
+    stream = manager.streams[0]
+
+    assert stream.iteration_count == 0
+    assert response.background is not None
+    await response.background()
+
+    assert stream.iteration_count == 0
+    assert stream.close_count == 1
 
 
 @pytest.mark.parametrize(

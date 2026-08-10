@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -103,6 +103,51 @@ class Session:
     id: str
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     handle: SessionSandboxHandle | None = None
+    deleting: bool = False
+    sandbox_closed: bool = False
+    checkpoint_deleted: bool = False
+
+
+class SessionEventStream(AsyncIterator[DomainEvent]):
+    """A closeable stream that owns a session lock from construction onward."""
+
+    def __init__(
+        self,
+        source: AsyncGenerator[DomainEvent, None],
+        session_lock: asyncio.Lock,
+    ) -> None:
+        self._source = source
+        self._session_lock = session_lock
+        self._close_lock = asyncio.Lock()
+        self._closed = False
+
+    def __aiter__(self) -> SessionEventStream:
+        return self
+
+    async def __anext__(self) -> DomainEvent:
+        if self._closed:
+            raise StopAsyncIteration
+
+        try:
+            return await anext(self._source)
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def aclose(self) -> None:
+        """Close the source and release the owned lock, even before iteration."""
+
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                await self._source.aclose()
+            finally:
+                self._session_lock.release()
 
 
 class DeepAgentManager:
@@ -168,15 +213,15 @@ class DeepAgentManager:
         self,
         session_id: str,
         message: str,
-    ) -> AsyncIterator[DomainEvent]:
+    ) -> SessionEventStream:
         """Acquire the session immediately and return its event stream."""
 
         session = self._require_session(session_id)
-        if session.lock.locked():
+        if session.deleting or session.lock.locked():
             raise SessionBusyError(session_id)
         await session.lock.acquire()
 
-        async def event_stream() -> AsyncIterator[DomainEvent]:
+        async def event_stream() -> AsyncGenerator[DomainEvent, None]:
             try:
                 async for namespace, mode, payload in self._orchestrator.astream(
                     {"messages": [HumanMessage(message)]},
@@ -197,10 +242,8 @@ class DeepAgentManager:
                 yield DoneEvent()
             except Exception:
                 yield ErrorEvent(message=STREAM_ERROR_MESSAGE)
-            finally:
-                session.lock.release()
 
-        return event_stream()
+        return SessionEventStream(event_stream(), session.lock)
 
     async def delete_session(self, session_id: str) -> None:
         """Destroy a non-busy session and remove all of its checkpoints."""
@@ -209,32 +252,51 @@ class DeepAgentManager:
         if session.lock.locked():
             raise SessionBusyError(session_id)
 
-        self._sessions.pop(session_id)
+        session.deleting = True
+        await session.lock.acquire()
         try:
-            if session.handle is not None:
-                await session.handle.session.close()
+            await self._cleanup_session(session)
+            self._sessions.pop(session_id)
         finally:
-            await self._checkpointer.adelete_thread(session_id)
+            session.lock.release()
 
     async def shutdown(self) -> None:
-        """Close every live sandbox and discard all in-memory session state."""
+        """Clean up every session, retaining any whose cleanup needs a retry."""
 
-        sessions = list(self._sessions.values())
-        self._sessions.clear()
         failures: list[Exception] = []
-        for session in sessions:
+        for session_id in list(self._sessions):
             try:
-                if session.handle is not None:
-                    await session.handle.session.close()
-            except Exception as exc:
-                failures.append(exc)
-            try:
-                await self._checkpointer.adelete_thread(session.id)
+                await self.delete_session(session_id)
             except Exception as exc:
                 failures.append(exc)
 
         if failures:
             raise ExceptionGroup("Failed to fully shut down the agent manager", failures)
+
+    async def _cleanup_session(self, session: Session) -> None:
+        failures: list[Exception] = []
+
+        if not session.sandbox_closed:
+            try:
+                if session.handle is not None:
+                    await session.handle.session.close()
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                session.sandbox_closed = True
+
+        if not session.checkpoint_deleted:
+            try:
+                await self._checkpointer.adelete_thread(session.id)
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                session.checkpoint_deleted = True
+
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise ExceptionGroup(f"Failed to delete session {session.id}", failures)
 
     def _require_session(self, session_id: str) -> Session:
         session = self._sessions.get(session_id)
@@ -244,6 +306,8 @@ class DeepAgentManager:
 
     def _resolve_handle(self, session_id: str) -> SessionSandboxHandle:
         session = self._require_session(session_id)
+        if session.deleting:
+            raise SessionBusyError(session_id)
         if session.handle is None:
             raise RuntimeError(f"Session {session_id} has no sandbox handle")
         return session.handle
