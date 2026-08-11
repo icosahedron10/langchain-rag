@@ -110,7 +110,8 @@ docker build -t ragchat-sandbox:latest sandbox/
 |---|---|
 | `GET /health` | Returns `{"status":"ok"}`. |
 | `POST /sessions` | Creates an in-memory conversation and returns `{"session_id":"..."}` (201). |
-| `POST /sessions/{session_id}/chat` | Accepts `{"message":"..."}` and streams `progress`, `message`, `artifact`, `done`, or `error` SSE events. |
+| `POST /sessions/{session_id}/chat` | Accepts `{"message":"..."}` and streams `run_started`, `progress`, `message`, `artifact`, `done`, or `error` SSE events. |
+| `POST /sessions/{session_id}/feedback` | Accepts `{"run_id":"...","score":0\|1}` and rates the traced run announced by `run_started` (204). |
 | `DELETE /sessions/{session_id}` | Deletes the conversation and its sandbox, if any (204). |
 
 Only one chat request may run per session; overlapping requests receive 409
@@ -139,6 +140,7 @@ for the complete list.
 | `DENSE_EMBEDDING_MODEL` | `sentence-transformers/all-mpnet-base-v2` | Dense query embedding model; collection vectors must be compatible (768 dimensions). |
 | `SPARSE_EMBEDDING_MODEL` | `Qdrant/bm25` | Sparse query embedding model. |
 | `RERANKER_MODEL` | `BAAI/bge-reranker-base` | Cross-encoder used after hybrid retrieval. |
+| `ENVIRONMENT` | `local` | Recorded on every traced run so LangSmith dashboards and run rules can be scoped by deployment. |
 | `SANDBOX_MODE` | `disabled` | Set to `docker` to expose isolated filesystem and execution tools. |
 | `SANDBOX_IMAGE` | `ragchat-sandbox:latest` | Docker image used for session sandboxes. |
 | `ARTIFACT_MAX_BYTES` | `5000000` | Maximum raw, pre-base64 size of each inline PNG, JPEG, or WebP artifact. |

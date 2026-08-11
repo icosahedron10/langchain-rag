@@ -35,6 +35,13 @@ class ArtifactEvent(BaseModel):
     data: str  # base64-encoded file content
 
 
+class RunStartedEvent(BaseModel):
+    """The traced root run for this turn, so the client can rate it."""
+
+    type: Literal["run_started"] = "run_started"
+    run_id: str
+
+
 class DoneEvent(BaseModel):
     type: Literal["done"] = "done"
 
@@ -45,7 +52,7 @@ class ErrorEvent(BaseModel):
 
 
 DomainEvent = Annotated[
-    ProgressEvent | MessageDelta | ArtifactEvent | DoneEvent | ErrorEvent,
+    ProgressEvent | MessageDelta | ArtifactEvent | RunStartedEvent | DoneEvent | ErrorEvent,
     Field(discriminator="type"),
 ]
 

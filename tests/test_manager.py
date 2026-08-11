@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -20,12 +21,14 @@ from ragchat.domain import (
     ErrorEvent,
     MessageDelta,
     ProgressEvent,
+    RunStartedEvent,
     SessionBusyError,
     SessionNotFoundError,
     StartupValidationError,
 )
 from ragchat.manager import STREAM_ERROR_MESSAGE, DeepAgentManager, RuntimeComponents
 from ragchat.retrieval import RetrievedPassage
+from ragchat.telemetry import ChatTrace
 
 
 def settings(*, sandbox_mode: SandboxMode = SandboxMode.DISABLED) -> Settings:
@@ -80,16 +83,21 @@ class ScriptedOrchestrator:
 
 
 class RecordingTelemetry:
-    def __init__(self) -> None:
+    def __init__(self, trace: ChatTrace | None = None) -> None:
         self.events: list[tuple[str, str] | str] = []
+        self.feedback: list[tuple[str, int]] = []
+        self.trace = trace if trace is not None else ChatTrace()
 
     @contextmanager
     def trace_chat(self, session_id: str) -> Any:
         self.events.append(("enter", session_id))
         try:
-            yield
+            yield self.trace
         finally:
             self.events.append(("exit", session_id))
+
+    def record_feedback(self, run_id: str, score: int) -> None:
+        self.feedback.append((run_id, score))
 
     def close(self) -> None:
         self.events.append("close")
@@ -321,6 +329,66 @@ async def test_trace_context_starts_on_consumption_and_closes_with_stream(
     await stream.aclose()
 
     assert telemetry.events == [("enter", session_id), ("exit", session_id)]
+
+
+@pytest.mark.asyncio
+async def test_traced_turn_announces_its_root_run_and_traces_the_graph_under_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = uuid.uuid4()
+    tracer = object()
+    telemetry = RecordingTelemetry(ChatTrace(run_id=run_id, tracer=cast("Any", tracer)))
+    monkeypatch.setattr(manager_module, "Telemetry", lambda _settings: telemetry)
+    orchestrator = ScriptedOrchestrator([((), "custom", {"type": "progress", "text": "first"})])
+    manager = make_manager(monkeypatch, orchestrator)
+    session_id = manager.create_session()
+
+    stream = await manager.stream_chat(session_id, "question")
+    events = [event async for event in stream]
+
+    assert events == [
+        RunStartedEvent(run_id=str(run_id)),
+        ProgressEvent(text="first"),
+        DoneEvent(),
+    ]
+    assert orchestrator.calls[0]["config"] == {
+        "configurable": {"thread_id": session_id},
+        "run_id": run_id,
+        "callbacks": [tracer],
+    }
+
+
+@pytest.mark.asyncio
+async def test_untraced_turn_announces_no_run_and_leaves_the_graph_config_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry = RecordingTelemetry()
+    monkeypatch.setattr(manager_module, "Telemetry", lambda _settings: telemetry)
+    orchestrator = ScriptedOrchestrator([((), "custom", {"type": "progress", "text": "first"})])
+    manager = make_manager(monkeypatch, orchestrator)
+    session_id = manager.create_session()
+
+    stream = await manager.stream_chat(session_id, "question")
+    events = [event async for event in stream]
+
+    assert events == [ProgressEvent(text="first"), DoneEvent()]
+    assert orchestrator.calls[0]["config"] == {"configurable": {"thread_id": session_id}}
+
+
+@pytest.mark.asyncio
+async def test_feedback_reaches_telemetry_only_for_a_known_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry = RecordingTelemetry()
+    monkeypatch.setattr(manager_module, "Telemetry", lambda _settings: telemetry)
+    manager = make_manager(monkeypatch, ScriptedOrchestrator())
+    session_id = manager.create_session()
+
+    await manager.record_feedback(session_id, "run-1", 1)
+    with pytest.raises(SessionNotFoundError):
+        await manager.record_feedback("missing", "run-2", 0)
+
+    assert telemetry.feedback == [("run-1", 1)]
 
 
 @pytest.mark.asyncio

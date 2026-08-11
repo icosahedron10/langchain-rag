@@ -27,6 +27,8 @@ def _init_state() -> None:
     st.session_state.setdefault("messages", [])  # {role, text, images: [(name, bytes)]}
     st.session_state.setdefault("busy", False)
     st.session_state.setdefault("pending", None)
+    st.session_state.setdefault("run_id", None)
+    st.session_state.setdefault("rated_run_id", None)
 
 
 def _ensure_session(client: httpx.Client) -> str:
@@ -51,6 +53,27 @@ def _reset_chat() -> None:
     st.session_state.messages = []
     st.session_state.busy = False
     st.session_state.pending = None
+    st.session_state.run_id = None
+    st.session_state.rated_run_id = None
+
+
+def _rate_reply(score: int) -> None:
+    """Send a thumbs rating for the traced run behind the latest answer."""
+    session_id = st.session_state.api_session_id
+    run_id = st.session_state.run_id
+    if session_id is None or run_id is None:
+        return
+    try:
+        response = httpx.post(
+            f"{API_URL}/sessions/{session_id}/feedback",
+            json={"run_id": run_id, "score": score},
+            timeout=10,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        st.error(f"Could not send feedback: {exc}")
+        return
+    st.session_state.rated_run_id = run_id
 
 
 def _decode_artifact(payload: dict) -> tuple[str, bytes] | None:
@@ -122,6 +145,8 @@ def _handle_event(
         return answer, None
     if event.event == "progress":
         status.write(payload.get("text", ""))
+    elif event.event == "run_started":
+        st.session_state.run_id = payload.get("run_id")
     elif event.event == "message":
         answer += payload.get("text", "")
         placeholder.markdown(answer)
@@ -153,6 +178,14 @@ with st.sidebar:
 
 _render_history()
 
+if st.session_state.run_id is not None and not st.session_state.busy:
+    if st.session_state.rated_run_id == st.session_state.run_id:
+        st.caption("Thanks for the feedback.")
+    else:
+        thumbs_up, thumbs_down, _ = st.columns([1, 1, 8])
+        thumbs_up.button("👍", key="rate_up", on_click=_rate_reply, args=(1,))
+        thumbs_down.button("👎", key="rate_down", on_click=_rate_reply, args=(0,))
+
 user_input = st.chat_input("Ask about the corpus…", disabled=st.session_state.busy)
 if st.session_state.busy and st.session_state.pending is not None:
     prompt = st.session_state.pending
@@ -164,6 +197,7 @@ if st.session_state.busy and st.session_state.pending is not None:
     st.rerun()
 elif user_input and not st.session_state.busy:
     st.session_state.messages.append({"role": "user", "text": user_input, "images": []})
+    st.session_state.run_id = None
     st.session_state.pending = user_input
     st.session_state.busy = True
     st.rerun()

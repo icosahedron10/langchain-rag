@@ -8,7 +8,12 @@ from litestar import Controller, Request, Response, delete, get, post
 from litestar.background_tasks import BackgroundTask
 from litestar.datastructures import State
 from litestar.response import ServerSentEvent, ServerSentEventMessage
-from litestar.status_codes import HTTP_200_OK, HTTP_404_NOT_FOUND, HTTP_409_CONFLICT
+from litestar.status_codes import (
+    HTTP_200_OK,
+    HTTP_204_NO_CONTENT,
+    HTTP_404_NOT_FOUND,
+    HTTP_409_CONFLICT,
+)
 from pydantic import BaseModel, Field
 
 from ragchat.domain import SessionBusyError, SessionNotFoundError
@@ -18,6 +23,13 @@ class ChatRequest(BaseModel):
     """Validated request body for one chat turn."""
 
     message: str = Field(min_length=1)
+
+
+class FeedbackRequest(BaseModel):
+    """Validated thumbs up/down rating for one traced chat run."""
+
+    run_id: str = Field(min_length=1)
+    score: int = Field(ge=0, le=1)
 
 
 def _handle_session_not_found(
@@ -80,6 +92,15 @@ class AgentController(Controller):
             messages(),
             background=BackgroundTask(events.aclose),
         )
+
+    @post("/sessions/{session_id:str}/feedback", status_code=HTTP_204_NO_CONTENT)
+    async def feedback(
+        self,
+        state: State,
+        session_id: str,
+        data: FeedbackRequest,
+    ) -> None:
+        await state.manager.record_feedback(session_id, data.run_id, data.score)
 
     @delete("/sessions/{session_id:str}")
     async def delete_session(self, state: State, session_id: str) -> None:

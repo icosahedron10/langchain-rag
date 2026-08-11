@@ -52,7 +52,8 @@ For a chat turn, the controller asks the manager for an event iterator before
 constructing the SSE response, so unknown and overlapping sessions become 404
 and 409 responses. The manager invokes the orchestrator with
 `thread_id == session_id`, then serializes only domain events through the
-controller as `progress`, `message`, `artifact`, `done`, or `error` SSE events.
+controller as `run_started`, `progress`, `message`, `artifact`, `done`, or
+`error` SSE events.
 Unexpected runtime errors become a generic public error rather than leaking
 prompts, credentials, scores, or internals.
 
@@ -63,6 +64,14 @@ retrieval, sandbox, or checkpoint ownership. The context closes on completion,
 failure, disconnect, or early stream closure, and the client flushes during
 manager shutdown even if session cleanup fails. Disabled mode creates no client
 and explicitly suppresses ambient tracing.
+
+Each traced turn runs under a root run whose id the manager chooses, so the
+session, environment, startup backend and sandbox mode, the commit and its
+dirty-worktree flag, and the turn's retrieval outcome are all filterable run
+metadata, and the client can rate that exact run through
+`POST /sessions/{session_id}/feedback`. The LangSmith endpoint, project, and
+tracing flags the SDK copies out of the environment are stripped before runs
+ship: they describe where traces go, not what happened.
 
 ## Agent and streaming decisions
 

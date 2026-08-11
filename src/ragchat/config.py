@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     langsmith_api_key: SecretStr | None = None
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_project: str | None = None
+    # Recorded on every traced run so dashboards and run rules can be scoped.
+    environment: str = "local"
 
     # Optional Docker sandbox.
     sandbox_mode: SandboxMode = SandboxMode.DISABLED

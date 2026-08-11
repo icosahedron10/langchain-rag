@@ -8,7 +8,7 @@ import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk, HumanMessage
@@ -23,6 +23,7 @@ from ragchat.domain import (
     DoneEvent,
     ErrorEvent,
     MessageDelta,
+    RunStartedEvent,
     SessionBusyError,
     SessionNotFoundError,
     StartupValidationError,
@@ -225,10 +226,15 @@ class DeepAgentManager:
 
         async def event_stream() -> AsyncGenerator[DomainEvent, None]:
             try:
-                with self._telemetry.trace_chat(session_id):
+                with self._telemetry.trace_chat(session_id) as chat_trace:
+                    config: dict[str, Any] = {"configurable": {"thread_id": session_id}}
+                    if chat_trace.run_id is not None:
+                        config["run_id"] = chat_trace.run_id
+                        config["callbacks"] = [chat_trace.tracer]
+                        yield RunStartedEvent(run_id=str(chat_trace.run_id))
                     async for namespace, mode, payload in self._orchestrator.astream(
                         {"messages": [HumanMessage(message)]},
-                        config={"configurable": {"thread_id": session_id}},
+                        config=config,
                         stream_mode=["messages", "custom"],
                         subgraphs=True,
                     ):
@@ -247,6 +253,12 @@ class DeepAgentManager:
                 yield ErrorEvent(message=STREAM_ERROR_MESSAGE)
 
         return SessionEventStream(event_stream(), session.lock)
+
+    async def record_feedback(self, session_id: str, run_id: str, score: int) -> None:
+        """Rate one traced chat run of an existing session."""
+
+        self._require_session(session_id)
+        await asyncio.to_thread(self._telemetry.record_feedback, run_id, score)
 
     async def delete_session(self, session_id: str) -> None:
         """Destroy a non-busy session and remove all of its checkpoints."""

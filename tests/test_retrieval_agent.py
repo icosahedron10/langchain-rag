@@ -252,6 +252,38 @@ async def test_evidence_resolution_is_verbatim_and_unknown_ids_become_gaps(
 
 
 @pytest.mark.asyncio
+async def test_per_turn_retrieval_quality_is_recorded_as_run_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    passage = RetrievedPassage("known-id", "policy.pdf", 12, "Verbatim evidence.")
+    model = ScriptedChatModel(
+        messages=iter(
+            [
+                tool_call("qdrant_hybrid_search", {"query": "first query"}, "search-1"),
+                tool_call("qdrant_hybrid_search", {"query": "second query"}, "search-2"),
+                retrieval_result(selected_point_ids=["known-id", "invented-id", "invented-id"]),
+            ]
+        )
+    )
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(retrieval_module, "get_stream_writer", lambda: lambda _: None)
+    monkeypatch.setattr(retrieval_module, "record_chat_metadata", recorded.append)
+
+    await build_search_corpus_tool(model, FakePipeline([passage])).ainvoke(
+        {"question": "What is the policy?"}
+    )
+
+    assert recorded == [
+        {
+            "answerable": True,
+            "n_sources": 1,
+            "unresolvable_point_id_count": 1,
+            "search_corpus_calls": 2,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_agent_exception_propagates_without_a_local_catch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

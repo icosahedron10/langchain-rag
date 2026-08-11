@@ -20,6 +20,7 @@ from ragchat.domain import (
     ErrorEvent,
     MessageDelta,
     ProgressEvent,
+    RunStartedEvent,
     SessionBusyError,
     SessionNotFoundError,
 )
@@ -62,6 +63,8 @@ class FakeManager:
         self.chat_calls: list[tuple[str, str]] = []
         self.streams: list[FakeEventStream] = []
         self.delete_calls: list[str] = []
+        self.feedback_calls: list[tuple[str, str, int]] = []
+        self.feedback_error: Exception | None = None
         self.shutdown_calls = 0
 
     def create_session(self) -> str:
@@ -80,6 +83,11 @@ class FakeManager:
         stream = FakeEventStream(self.events)
         self.streams.append(stream)
         return stream
+
+    async def record_feedback(self, session_id: str, run_id: str, score: int) -> None:
+        self.feedback_calls.append((session_id, run_id, score))
+        if self.feedback_error is not None:
+            raise self.feedback_error
 
     async def delete_session(self, session_id: str) -> None:
         self.delete_calls.append(session_id)
@@ -166,6 +174,7 @@ def test_chat_rejects_an_empty_message_before_delegating(settings: Settings) -> 
 def test_chat_serializes_every_domain_event_as_sse(settings: Settings) -> None:
     manager = FakeManager()
     manager.events = [
+        RunStartedEvent(run_id="11111111-1111-1111-1111-111111111111"),
         ProgressEvent(text='Searching for: "exact query"'),
         MessageDelta(text="answer "),
         ArtifactEvent(
@@ -263,6 +272,60 @@ def test_chat_translates_pre_stream_domain_exceptions(
     assert response.status_code == status_code
     assert response.json() == body
     assert manager.chat_calls == [("session-1", "question")]
+
+
+def test_feedback_delegates_a_validated_rating_to_the_manager(settings: Settings) -> None:
+    manager = FakeManager()
+
+    with TestClient(_test_app(settings, manager)) as client:
+        response = client.post(
+            "/sessions/session-1/feedback",
+            json={"run_id": "run-1", "score": 1},
+        )
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert manager.feedback_calls == [("session-1", "run-1", 1)]
+
+
+@pytest.mark.parametrize(
+    ("body", "key"),
+    [
+        ({"run_id": "", "score": 1}, "run_id"),
+        ({"run_id": "run-1", "score": 5}, "score"),
+    ],
+    ids=["missing-run-id", "score-outside-thumbs"],
+)
+def test_feedback_rejects_bad_ratings_before_delegating(
+    settings: Settings,
+    body: dict[str, object],
+    key: str,
+) -> None:
+    manager = FakeManager()
+
+    with TestClient(_test_app(settings, manager)) as client:
+        response = client.post("/sessions/session-1/feedback", json=body)
+
+    assert response.status_code == 400
+    assert response.json()["extra"][0]["key"] == key
+    assert manager.feedback_calls == []
+
+
+def test_feedback_uses_the_controller_exception_map(settings: Settings) -> None:
+    manager = FakeManager()
+    manager.feedback_error = SessionNotFoundError("session-1")
+
+    with TestClient(_test_app(settings, manager)) as client:
+        response = client.post(
+            "/sessions/session-1/feedback",
+            json={"run_id": "run-1", "score": 0},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "session_not_found",
+        "detail": "Unknown session: session-1",
+    }
 
 
 def test_delete_uses_the_controller_exception_map(settings: Settings) -> None:

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from ragchat.prompts import retrieval_prompt
 from ragchat.retrieval import RetrievedPassage, SearchPipeline
+from ragchat.telemetry import record_chat_metadata
 
 MAX_SEARCHES = 3
 
@@ -115,6 +116,14 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
             summary=structured.summary,
             sources=sources,
             gaps=gaps,
+        )
+        record_chat_metadata(
+            {
+                "answerable": structured.answerable,
+                "n_sources": len(sources),
+                "unresolvable_point_id_count": len(set(unknown_ids)),
+                "search_corpus_calls": search_count,
+            }
         )
         return evidence.model_dump_json()
 
