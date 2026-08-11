@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models import BaseChatModel
@@ -13,7 +15,10 @@ from pydantic import BaseModel, Field
 from ragchat.prompts import retrieval_prompt
 from ragchat.retrieval import RetrievedPassage, SearchPipeline
 
+logger = logging.getLogger(__name__)
+
 MAX_SEARCHES = 3
+MIN_PREFIX_LENGTH = 8
 
 
 class RetrievalResult(BaseModel):
@@ -43,6 +48,27 @@ class CorpusEvidence(BaseModel):
     gaps: list[str]
 
 
+def _resolve_selection(
+    raw: str,
+    observed: dict[str, RetrievedPassage],
+    ordinals: dict[str, str],
+) -> RetrievedPassage | None:
+    """Resolve a model-written citation label to an observed passage, tolerating slips."""
+    candidate = raw.strip().strip("[]").strip().rstrip("?").strip()
+    if not candidate:
+        return None
+    if candidate.isdigit() and candidate in ordinals:
+        return observed.get(ordinals[candidate])
+    passage = observed.get(candidate)
+    if passage is not None:
+        return passage
+    if len(candidate) >= MIN_PREFIX_LENGTH:
+        matches = [key for key in observed if key.startswith(candidate)]
+        if len(matches) == 1:
+            return observed[matches[0]]
+    return None
+
+
 def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> BaseTool:
     """Build the orchestrator's sole corpus-search tool."""
 
@@ -53,6 +79,7 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
         Use concise 3-8 word search queries for better hits.
         """
         observed: dict[str, RetrievedPassage] = {}
+        ordinals: dict[str, str] = {}
         search_count = 0
 
         @tool
@@ -67,14 +94,19 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
             writer = get_stream_writer()
             writer({"type": "progress", "text": f'Searching for: "{query}"'})
             passages = await pipeline.search(query)
+            labelled = {point_id: label for label, point_id in ordinals.items()}
+            lines: list[str] = []
             for passage in passages:
                 observed[passage.point_id] = passage
+                label = labelled.get(passage.point_id)
+                if label is None:
+                    label = str(len(ordinals) + 1)
+                    ordinals[label] = passage.point_id
+                    labelled[passage.point_id] = label
+                lines.append(f"[{label}] {passage.document} p.{passage.page}: {passage.content}")
 
             writer({"type": "progress", "text": "Reviewing the retrieved passages…"})
-            return "\n".join(
-                f"[{passage.point_id}] {passage.document} p.{passage.page}: {passage.content}"
-                for passage in passages
-            )
+            return "\n".join(lines)
 
         agent = create_agent(
             model,
@@ -91,10 +123,10 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
 
         sources: list[EvidenceSource] = []
         unknown_ids: list[str] = []
-        for point_id in structured.selected_point_ids:
-            passage = observed.get(point_id)
+        for selected in structured.selected_point_ids:
+            passage = _resolve_selection(selected, observed, ordinals)
             if passage is None:
-                unknown_ids.append(point_id)
+                unknown_ids.append(selected)
                 continue
             sources.append(
                 EvidenceSource(
@@ -108,7 +140,16 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
         gaps = list(structured.gaps)
         if unknown_ids:
             unresolved = ", ".join(dict.fromkeys(unknown_ids))
-            gaps.append(f"Unresolvable citations: point IDs were not observed: {unresolved}")
+            gaps.append(
+                f"Unresolvable citations ({len(unknown_ids)} unresolved, {len(sources)} "
+                f"resolved): point IDs were not observed: {unresolved}"
+            )
+            logger.warning(
+                "search_corpus dropped %d selected passages (%d resolved): %s",
+                len(unknown_ids),
+                len(sources),
+                unresolved,
+            )
 
         evidence = CorpusEvidence(
             answerable=structured.answerable,

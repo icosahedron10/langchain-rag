@@ -252,6 +252,91 @@ async def test_evidence_resolution_is_verbatim_and_unknown_ids_become_gaps(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("selected", "expected_point_ids"),
+    [
+        (["[1]"], ["3f2c9b71-known-point-id"]),
+        (["3f2c9b71-known-point-id?"], ["3f2c9b71-known-point-id"]),
+        (["1"], ["3f2c9b71-known-point-id"]),
+        (["3f2c9b71-known"], ["3f2c9b71-known-point-id"]),
+        (["12"], []),
+    ],
+)
+async def test_slipped_citation_labels_recover_but_unknown_ones_still_drop(
+    monkeypatch: pytest.MonkeyPatch,
+    selected: list[str],
+    expected_point_ids: list[str],
+) -> None:
+    passage = RetrievedPassage(
+        point_id="3f2c9b71-known-point-id",
+        document="policy.pdf",
+        page=12,
+        content="Verbatim evidence.",
+    )
+    model = ScriptedChatModel(
+        messages=iter(
+            [
+                tool_call("qdrant_hybrid_search", {"query": "policy terminology"}, "search"),
+                retrieval_result(selected_point_ids=selected),
+            ]
+        )
+    )
+    monkeypatch.setattr(retrieval_module, "get_stream_writer", lambda: lambda _: None)
+
+    raw_evidence = await build_search_corpus_tool(model, FakePipeline([passage])).ainvoke(
+        {"question": "What is the policy?"}
+    )
+
+    evidence = CorpusEvidence.model_validate_json(raw_evidence)
+    assert [source.point_id for source in evidence.sources] == expected_point_ids
+    if expected_point_ids:
+        assert evidence.gaps == []
+    else:
+        assert "12" in evidence.gaps[0]
+
+
+@pytest.mark.asyncio
+async def test_search_hits_are_labelled_with_short_ordinals_not_raw_point_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    passages = [
+        RetrievedPassage("3f2c9b71-first", "a.pdf", 1, "First."),
+        RetrievedPassage("88de1a04-second", "b.pdf", 2, "Second."),
+    ]
+    rendered_hits: list[str] = []
+
+    class CapturingAgent:
+        def __init__(self, tools: list[Any]) -> None:
+            self.tools = tools
+
+        async def ainvoke(self, _input: Any) -> Any:
+            rendered_hits.append(await self.tools[0].ainvoke({"query": "corpus terminology"}))
+            return {
+                "structured_response": {
+                    "answerable": True,
+                    "summary": "The model's evidence synthesis.",
+                    "selected_point_ids": ["2"],
+                    "gaps": [],
+                }
+            }
+
+    monkeypatch.setattr(
+        retrieval_module,
+        "create_agent",
+        lambda *args, **kwargs: CapturingAgent(kwargs["tools"]),
+    )
+    monkeypatch.setattr(retrieval_module, "get_stream_writer", lambda: lambda _: None)
+
+    raw_evidence = await build_search_corpus_tool(
+        ScriptedChatModel(messages=iter([])), FakePipeline(passages)
+    ).ainvoke({"question": "What does the corpus say?"})
+
+    assert rendered_hits == ["[1] a.pdf p.1: First.\n[2] b.pdf p.2: Second."]
+    evidence = CorpusEvidence.model_validate_json(raw_evidence)
+    assert [source.point_id for source in evidence.sources] == ["88de1a04-second"]
+
+
+@pytest.mark.asyncio
 async def test_agent_exception_propagates_without_a_local_catch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

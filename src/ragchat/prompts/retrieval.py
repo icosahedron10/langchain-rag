@@ -32,9 +32,12 @@ When you are done searching, produce the structured result:
 about the question — synthesize across passages, note agreements and \
 tensions, and make it useful on its own. Do not reproduce long verbatim \
 passages from memory; the application attaches exact passages itself.
-- `selected_point_ids`: the point ids (shown with each search hit) of the \
-passages that actually support your summary. Select only points you saw in \
-this request's search results.
+- `selected_point_ids`: the bracketed label shown at the start of each search \
+hit, for the passages that actually support your summary. Copy each label \
+character-for-character as shown, without the surrounding square brackets, \
+without truncating it, and without inventing or guessing one; never substitute \
+a page number. Select only labels you saw in this request's search results — \
+an unrecognized label makes that passage disappear from the final answer.
 - `gaps`: aspects of the question the evidence does not resolve. Empty if \
 none.\
 """
