@@ -252,6 +252,64 @@ async def test_evidence_resolution_is_verbatim_and_unknown_ids_become_gaps(
 
 
 @pytest.mark.asyncio
+async def test_repeated_selections_collapse_to_one_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    passage = RetrievedPassage("looped-id", "manual.pdf", 2, "Cited once, however often chosen.")
+    model = ScriptedChatModel(
+        messages=iter(
+            [
+                tool_call("qdrant_hybrid_search", {"query": "looping decode"}, "search"),
+                retrieval_result(selected_point_ids=["looped-id"] * 500),
+            ]
+        )
+    )
+    monkeypatch.setattr(retrieval_module, "get_stream_writer", lambda: lambda _: None)
+
+    raw_evidence = await build_search_corpus_tool(model, FakePipeline([passage])).ainvoke(
+        {"question": "What does the manual say?"}
+    )
+
+    evidence = CorpusEvidence.model_validate_json(raw_evidence)
+    assert [source.point_id for source in evidence.sources] == ["looped-id"]
+    assert evidence.gaps == []
+
+
+@pytest.mark.asyncio
+async def test_selections_beyond_the_retrieval_ceiling_are_dropped_and_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    max_sources = MAX_SEARCHES * 10
+    passages = [
+        RetrievedPassage(f"point-{index}", "manual.pdf", index, f"Evidence {index}.")
+        for index in range(max_sources + 5)
+    ]
+    model = ScriptedChatModel(
+        messages=iter(
+            [
+                tool_call("qdrant_hybrid_search", {"query": "every passage"}, "search"),
+                retrieval_result(
+                    selected_point_ids=[passage.point_id for passage in passages],
+                ),
+            ]
+        )
+    )
+    monkeypatch.setattr(retrieval_module, "get_stream_writer", lambda: lambda _: None)
+
+    raw_evidence = await build_search_corpus_tool(model, FakePipeline(passages)).ainvoke(
+        {"question": "What does the manual say?"}
+    )
+
+    evidence = CorpusEvidence.model_validate_json(raw_evidence)
+    assert len(evidence.sources) == max_sources
+    assert [source.point_id for source in evidence.sources] == [
+        passage.point_id for passage in passages[:max_sources]
+    ]
+    assert str(max_sources) in evidence.gaps[0]
+    assert "5 extra selections were discarded." in evidence.gaps[0]
+
+
+@pytest.mark.asyncio
 async def test_agent_exception_propagates_without_a_local_catch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

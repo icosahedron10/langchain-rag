@@ -42,8 +42,17 @@ if TYPE_CHECKING:
 
 
 STREAM_ERROR_MESSAGE = "An unexpected error occurred while processing your request."
+MODEL_TIMEOUT_MESSAGE = "The model request timed out. Please retry your question."
 
 _DOMAIN_EVENT_ADAPTER: TypeAdapter[DomainEvent] = TypeAdapter(DomainEvent)
+
+
+def _is_request_timeout(error: BaseException) -> bool:
+    """Report whether a failure is a model request timeout rather than a bug."""
+    # The OpenAI client's timeout is an APIConnectionError, not a builtin TimeoutError.
+    from openai import APITimeoutError
+
+    return isinstance(error, TimeoutError | APITimeoutError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,8 +252,11 @@ class DeepAgentManager:
                             yield MessageDelta(text=chunk.text)
 
                     yield DoneEvent()
-            except Exception:
-                yield ErrorEvent(message=STREAM_ERROR_MESSAGE)
+            except Exception as error:
+                if _is_request_timeout(error):
+                    yield ErrorEvent(message=MODEL_TIMEOUT_MESSAGE)
+                else:
+                    yield ErrorEvent(message=STREAM_ERROR_MESSAGE)
 
         return SessionEventStream(event_stream(), session.lock)
 

@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5.6-luna"
 
+    # Hard bounds on a single model request so a runaway decode cannot stall a turn.
+    model_request_timeout_seconds: float = Field(default=90.0, gt=0)
+    model_max_output_tokens: int = Field(default=32_768, ge=1)
+
     # Qdrant: externally populated, read-only dependency.
     qdrant_url: str = "http://127.0.0.1:6333"
     qdrant_api_key: SecretStr | None = None

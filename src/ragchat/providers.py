@@ -43,6 +43,7 @@ def _build_vllm_chat_model(settings: Settings) -> BaseChatModel:
         async_client=client.chat.completions,
         root_async_client=client,
         max_tokens=32_768,
+        timeout=settings.model_request_timeout_seconds,
         temperature=0.7,
         top_p=0.8,
         presence_penalty=1.5,

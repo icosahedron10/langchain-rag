@@ -91,7 +91,13 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
 
         sources: list[EvidenceSource] = []
         unknown_ids: list[str] = []
-        for point_id in structured.selected_point_ids:
+        # A degenerate decode can repeat point IDs indefinitely; the pipeline can never
+        # observe more than MAX_SEARCHES * 10 distinct passages, so drop the rest.
+        max_sources = MAX_SEARCHES * 10
+        unique_ids = list(dict.fromkeys(structured.selected_point_ids))
+        selected_ids = unique_ids[:max_sources]
+        dropped = len(unique_ids) - len(selected_ids)
+        for point_id in selected_ids:
             passage = observed.get(point_id)
             if passage is None:
                 unknown_ids.append(point_id)
@@ -106,6 +112,11 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
             )
 
         gaps = list(structured.gaps)
+        if dropped:
+            gaps.append(
+                f"Citation selection exceeded the retrieval ceiling of {max_sources}; "
+                f"{dropped} extra selections were discarded."
+            )
         if unknown_ids:
             unresolved = ", ".join(dict.fromkeys(unknown_ids))
             gaps.append(f"Unresolvable citations: point IDs were not observed: {unresolved}")

@@ -20,6 +20,28 @@ def test_local_vllm_and_disabled_sandbox_are_the_defaults() -> None:
     assert configured.sandbox_mode is SandboxMode.DISABLED
 
 
+def test_model_request_bounds_default_and_reject_unbounded_values() -> None:
+    configured = Settings(
+        _env_file=None,
+        vllm_base_url="http://vllm.test/v1",
+        vllm_model="test-model",
+        qdrant_collection="corpus",
+    )
+
+    assert configured.model_request_timeout_seconds == 90.0
+    assert configured.model_max_output_tokens == 32_768
+
+    for overrides in ({"model_request_timeout_seconds": 0}, {"model_max_output_tokens": 0}):
+        with pytest.raises(ValidationError):
+            Settings(
+                _env_file=None,
+                vllm_base_url="http://vllm.test/v1",
+                vllm_model="test-model",
+                qdrant_collection="corpus",
+                **overrides,
+            )
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [

@@ -93,6 +93,7 @@ def test_vllm_injects_both_async_client_handles(
         "async_client": root_client.chat.completions,
         "root_async_client": root_client,
         "max_tokens": 32_768,
+        "timeout": 90.0,
         "temperature": 0.7,
         "top_p": 0.8,
         "presence_penalty": 1.5,
@@ -158,5 +159,29 @@ def test_openai_backend_constructs_only_official_model_configuration(
         "model": "official-model",
         "api_key": "official-secret",
         "reasoning": {"effort": "low"},
+        "timeout": 90.0,
+        "max_tokens": 32_768,
+        "max_retries": 2,
     }
     assert FakeAsyncOpenAI.calls == []
+
+
+def test_configured_request_bounds_reach_both_backends(
+    fake_provider_modules: None,
+) -> None:
+    from ragchat.openai_backend import build_openai_chat_model
+
+    vllm = providers.build_chat_model(
+        vllm_settings().model_copy(update={"model_request_timeout_seconds": 12.5})
+    )
+    official = build_openai_chat_model(
+        openai_settings().model_copy(
+            update={"model_request_timeout_seconds": 12.5, "model_max_output_tokens": 4_096}
+        )
+    )
+
+    assert isinstance(vllm, FakeChatOpenAI)
+    assert isinstance(official, FakeChatOpenAI)
+    assert vllm.kwargs["timeout"] == 12.5
+    assert official.kwargs["timeout"] == 12.5
+    assert official.kwargs["max_tokens"] == 4_096

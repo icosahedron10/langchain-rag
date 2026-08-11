@@ -24,7 +24,12 @@ from ragchat.domain import (
     SessionNotFoundError,
     StartupValidationError,
 )
-from ragchat.manager import STREAM_ERROR_MESSAGE, DeepAgentManager, RuntimeComponents
+from ragchat.manager import (
+    MODEL_TIMEOUT_MESSAGE,
+    STREAM_ERROR_MESSAGE,
+    DeepAgentManager,
+    RuntimeComponents,
+)
 from ragchat.retrieval import RetrievedPassage
 
 
@@ -427,6 +432,20 @@ async def test_stream_exception_yields_only_fixed_generic_error_and_releases_loc
 
     assert events == [ErrorEvent(message=STREAM_ERROR_MESSAGE)]
     assert "secret-api-key" not in events[0].message
+    assert manager._sessions[session_id].lock.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_model_timeout_is_reported_as_a_retryable_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = ScriptedOrchestrator([TimeoutError("model request timed out")])
+    manager = make_manager(monkeypatch, orchestrator)
+    session_id = manager.create_session()
+
+    events = [event async for event in await manager.stream_chat(session_id, "slow question")]
+
+    assert events == [ErrorEvent(message=MODEL_TIMEOUT_MESSAGE)]
     assert manager._sessions[session_id].lock.locked() is False
 
 
