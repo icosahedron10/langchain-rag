@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from ragchat.prompts import retrieval_prompt
 from ragchat.retrieval import RetrievedPassage, SearchPipeline
+from ragchat.telemetry import record_retrieval_digest
 
 MAX_SEARCHES = 3
 
@@ -115,6 +116,11 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
             summary=structured.summary,
             sources=sources,
             gaps=gaps,
+        )
+        record_retrieval_digest(
+            evidence_text="\n\n".join(source.evidence for source in evidence.sources),
+            pages=[source.page for source in evidence.sources],
+            answerable=evidence.answerable,
         )
         return evidence.model_dump_json()
 

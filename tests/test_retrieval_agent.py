@@ -102,6 +102,45 @@ async def test_model_chosen_query_emits_progress_before_search_and_builds_fresh_
 
 
 @pytest.mark.asyncio
+async def test_every_search_corpus_call_records_its_resolved_evidence_for_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    passage = RetrievedPassage("point-2", "manual.pdf", 9, "Late-turn corpus wording.")
+
+    class LateHitPipeline(FakePipeline):
+        async def search(self, query: str) -> list[RetrievedPassage]:
+            self.queries.append(query)
+            return [passage] if len(self.queries) > 1 else []
+
+    model = ScriptedChatModel(
+        messages=iter(
+            [
+                tool_call("qdrant_hybrid_search", {"query": "first attempt"}, "search-1"),
+                retrieval_result(),
+                tool_call("qdrant_hybrid_search", {"query": "second attempt"}, "search-2"),
+                retrieval_result(selected_point_ids=["point-2"]),
+            ]
+        )
+    )
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(retrieval_module, "get_stream_writer", lambda: lambda _: None)
+    monkeypatch.setattr(
+        retrieval_module,
+        "record_retrieval_digest",
+        lambda **kwargs: recorded.append(kwargs),
+    )
+    search_tool = build_search_corpus_tool(model, LateHitPipeline())
+
+    await search_tool.ainvoke({"question": "first"})
+    await search_tool.ainvoke({"question": "second"})
+
+    assert recorded == [
+        {"evidence_text": "", "pages": [], "answerable": True},
+        {"evidence_text": "Late-turn corpus wording.", "pages": [9], "answerable": True},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_hard_search_cap_refuses_a_fourth_model_requested_search(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 import ragchat.telemetry as telemetry_module
 from ragchat.config import Settings
-from ragchat.telemetry import Telemetry
+from ragchat.telemetry import EVIDENCE_TEXT_LIMIT, Telemetry, record_retrieval_digest
 
 
 def settings(**overrides: Any) -> Settings:
@@ -131,3 +131,96 @@ def test_enabled_mode_builds_context_and_closes_client(
         "client": telemetry._client,
     }
     assert telemetry._client.closed is True
+
+
+class RecordingClient:
+    def __init__(self, **kwargs: Any) -> None:
+        del kwargs
+        self.updates: list[dict[str, Any]] = []
+
+    def update_run(self, run_id: str, **kwargs: Any) -> None:
+        self.updates.append({"run_id": run_id, **kwargs})
+
+    def close(self) -> None:
+        pass
+
+
+def enabled_telemetry(monkeypatch: pytest.MonkeyPatch) -> Telemetry:
+    monkeypatch.setattr(telemetry_module, "Client", RecordingClient)
+    monkeypatch.setattr(telemetry_module, "tracing_context", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(
+        telemetry_module,
+        "get_current_run_tree",
+        lambda: type("FakeRunTree", (), {"trace_id": "root-run-id"})(),
+    )
+
+    return Telemetry(settings(langsmith_tracing=True, langsmith_api_key="secret"))
+
+
+def test_retrieval_digest_unions_every_search_corpus_call_in_one_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry = enabled_telemetry(monkeypatch)
+
+    with telemetry.trace_chat("session-3"):
+        record_retrieval_digest(evidence_text="", pages=[], answerable=False)
+        record_retrieval_digest(
+            evidence_text="Page four wording.",
+            pages=[4, None, 4],
+            answerable=True,
+        )
+        record_retrieval_digest(
+            evidence_text="Page nine wording.",
+            pages=[9],
+            answerable=False,
+        )
+
+    assert telemetry._client.updates == [
+        {
+            "run_id": "root-run-id",
+            "extra": {
+                "metadata": {
+                    "session_id": "session-3",
+                    "retrieval_digest": {
+                        "evidence_text": "Page four wording.\n\nPage nine wording.",
+                        "pages": [4, 9],
+                        "answerable": True,
+                        "search_corpus_calls": 3,
+                    },
+                }
+            },
+        }
+    ]
+
+
+def test_retrieval_digest_truncates_evidence_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    telemetry = enabled_telemetry(monkeypatch)
+
+    with telemetry.trace_chat("session-4"):
+        record_retrieval_digest(
+            evidence_text="e" * (EVIDENCE_TEXT_LIMIT + 500),
+            pages=[1],
+            answerable=True,
+        )
+
+    digest = telemetry._client.updates[0]["extra"]["metadata"]["retrieval_digest"]
+    assert len(digest["evidence_text"]) == EVIDENCE_TEXT_LIMIT
+
+
+def test_turns_without_retrieval_or_tracing_record_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry = enabled_telemetry(monkeypatch)
+
+    with telemetry.trace_chat("session-5"):
+        pass
+
+    assert telemetry._client.updates == []
+
+    monkeypatch.setattr(telemetry_module, "tracing_context", lambda **_kwargs: nullcontext())
+    disabled = Telemetry(settings())
+    record_retrieval_digest(evidence_text="outside any turn", pages=[1], answerable=True)
+    with disabled.trace_chat("session-6"):
+        record_retrieval_digest(evidence_text="tracing disabled", pages=[2], answerable=True)
+
+    assert disabled._client is None
