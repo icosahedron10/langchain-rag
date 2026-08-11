@@ -12,7 +12,8 @@ flowchart LR
     O -->|"search_corpus"| R["Retrieval agent<br/>create_agent, checkpointer=False"]
     R -->|"qdrant_hybrid_search<br/>at most 3 calls"| P["HybridSearchPipeline<br/>20 → deduplicate → rerank 10"]
     P -->|"read-only"| Q[("External Qdrant corpus")]
-    M --> CP[("InMemorySaver<br/>thread_id = session_id")]
+   M --> CP[("InMemorySaver<br/>thread_id = session_id")]
+   M -.->|"opt-in trace context"| LS["LangSmith"]
     O -.->|"Docker mode only:<br/>FilesystemMiddleware"| B["SessionRoutingBackend"]
     B --> D["One lazy Docker container<br/>and workspace per session"]
     D -->|"inline image events"| M
@@ -25,7 +26,7 @@ flowchart LR
 | `ui/streamlit_app.py` | API calls, SSE rendering, chat UI | Imports from `ragchat`, direct model/Qdrant access |
 | `controller.py` | The four routes, request validation, status translation, SSE serialization | Agent, retrieval, session, or sandbox policy |
 | `app.py` | Litestar construction and manager startup/shutdown lifespan | Runtime decisions |
-| `manager.py` | Dependency composition, graph, sessions, locks, checkpoints, domain-event stream | Litestar or other HTTP types |
+| `manager.py` | Dependency composition, graph, sessions, locks, checkpoints, telemetry, domain-event stream | Litestar or other HTTP types |
 | `agents/` | Orchestrator and retrieval-agent composition | HTTP and direct Qdrant construction |
 | `retrieval/` | Corpus validation and the exact hybrid/rerank pipeline | Ingestion or collection repair |
 | `sandbox/` | Session-routed file/execute tools, Docker lifecycle, image artifacts | Corpus or model access |
@@ -54,6 +55,14 @@ and 409 responses. The manager invokes the orchestrator with
 controller as `progress`, `message`, `artifact`, `done`, or `error` SSE events.
 Unexpected runtime errors become a generic public error rather than leaking
 prompts, credentials, scores, or internals.
+
+Optional LangSmith tracing is also startup-configured. The manager owns one
+client and wraps each consumed outer graph stream in a trace context, which
+propagates through nested retrieval and tool execution without changing HTTP,
+retrieval, sandbox, or checkpoint ownership. The context closes on completion,
+failure, disconnect, or early stream closure, and the client flushes during
+manager shutdown even if session cleanup fails. Disabled mode creates no client
+and explicitly suppresses ambient tracing.
 
 ## Agent and streaming decisions
 

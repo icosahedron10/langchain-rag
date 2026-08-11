@@ -48,13 +48,16 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
 
     @tool
     async def search_corpus(question: str) -> str:
-        """Research a question in the private corpus and return grounded evidence."""
+        """Research the question and return grounded evidence.
+
+        Use concise 3-8 word search queries for better hits.
+        """
         observed: dict[str, RetrievedPassage] = {}
         search_count = 0
 
         @tool
         async def qdrant_hybrid_search(query: str) -> str:
-            """Run one hybrid corpus search using a focused embedding query."""
+            """Run one hybrid corpus search using a focused 3-8 word query, not a full question."""
             nonlocal search_count
 
             if search_count >= MAX_SEARCHES:
@@ -75,6 +78,7 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
 
         agent = create_agent(
             model,
+            name="ragchat_retrieval",
             tools=[qdrant_hybrid_search],
             system_prompt=retrieval_prompt(),
             response_format=ToolStrategy(RetrievalResult),

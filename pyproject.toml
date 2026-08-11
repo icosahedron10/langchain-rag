@@ -12,6 +12,7 @@ dependencies = [
     "openai>=1.60",
     "langchain>=1.0,<2.0",
     "langgraph>=1.0,<2.0",
+    "langsmith>=0.10.9",
     "deepagents>=0.2",
     "langchain-openai>=1.0,<2.0",
     "langchain-qdrant>=0.2",

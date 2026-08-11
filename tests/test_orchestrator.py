@@ -42,6 +42,7 @@ def test_disabled_mode_wires_only_search_without_importing_deepagents(
     assert result is graph
     assert calls == [
         {
+            "name": "ragchat_orchestrator",
             "tools": [search_corpus],
             "system_prompt": orchestrator_module.orchestrator_prompt(False),
             "checkpointer": checkpointer,
@@ -87,6 +88,7 @@ def test_sandbox_mode_adds_one_filesystem_middleware_around_the_same_corpus_tool
 
     assert middleware_backends == [backend]
     assert calls[0]["tools"] == [search_corpus]
+    assert calls[0]["name"] == "ragchat_orchestrator"
     assert calls[0]["system_prompt"] == orchestrator_module.orchestrator_prompt(True)
     assert calls[0]["checkpointer"] is False
     assert len(calls[0]["middleware"]) == 1

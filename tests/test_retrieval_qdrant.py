@@ -22,6 +22,8 @@ def make_settings(**overrides: Any) -> Settings:
         "vllm_base_url": "http://vllm.test/v1",
         "vllm_model": "local-model",
         "qdrant_collection": "corpus",
+        "qdrant_dense_vector_name": "sentence-transformers/all-mpnet-base-v2",
+        "qdrant_sparse_vector_name": "Qdrant/bm25",
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
@@ -185,8 +187,8 @@ def test_build_vector_store_uses_verified_hybrid_configuration(
         "embedding": calls["dense"],
         "sparse_embedding": calls["sparse"],
         "retrieval_mode": "hybrid",
-        "vector_name": "dense",
-        "sparse_vector_name": "sparse",
+        "vector_name": "sentence-transformers/all-mpnet-base-v2",
+        "sparse_vector_name": "Qdrant/bm25",
         "validate_collection_config": True,
     }
 

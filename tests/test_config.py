@@ -15,7 +15,7 @@ def test_local_vllm_and_disabled_sandbox_are_the_defaults() -> None:
     )
 
     assert configured.api_host == "127.0.0.1"
-    assert configured.api_port == 8080
+    assert configured.api_port == 8081
     assert configured.model_backend is ModelBackend.VLLM
     assert configured.sandbox_mode is SandboxMode.DISABLED
 

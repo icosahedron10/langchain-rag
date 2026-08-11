@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -76,6 +77,22 @@ class ScriptedOrchestrator:
             if isinstance(item, Exception):
                 raise item
             yield item
+
+
+class RecordingTelemetry:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str] | str] = []
+
+    @contextmanager
+    def trace_chat(self, session_id: str) -> Any:
+        self.events.append(("enter", session_id))
+        try:
+            yield
+        finally:
+            self.events.append(("exit", session_id))
+
+    def close(self) -> None:
+        self.events.append("close")
 
 
 @dataclass
@@ -277,6 +294,33 @@ async def test_lock_is_acquired_before_return_and_released_when_stream_closes_ea
     await stream.aclose()
 
     assert manager._sessions[session_id].lock.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_trace_context_starts_on_consumption_and_closes_with_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry = RecordingTelemetry()
+    monkeypatch.setattr(manager_module, "Telemetry", lambda _settings: telemetry)
+    manager = make_manager(
+        monkeypatch,
+        ScriptedOrchestrator(
+            [
+                ((), "custom", {"type": "progress", "text": "first"}),
+                ((), "custom", {"type": "progress", "text": "second"}),
+            ]
+        ),
+    )
+    session_id = manager.create_session()
+
+    stream = await manager.stream_chat(session_id, "question")
+    assert telemetry.events == []
+    assert await anext(stream) == ProgressEvent(text="first")
+    assert telemetry.events == [("enter", session_id)]
+
+    await stream.aclose()
+
+    assert telemetry.events == [("enter", session_id), ("exit", session_id)]
 
 
 @pytest.mark.asyncio
@@ -536,6 +580,25 @@ async def test_shutdown_closes_and_forgets_every_session(
     assert manager._sessions == {}
     assert saver.deleted == session_ids
     assert all(handles[session_id].session.close_count == 1 for session_id in session_ids)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_telemetry_when_session_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry = RecordingTelemetry()
+    monkeypatch.setattr(manager_module, "Telemetry", lambda _settings: telemetry)
+    manager = make_manager(
+        monkeypatch,
+        ScriptedOrchestrator(),
+        saver=RecordingSaver(failures_remaining=1),
+    )
+    manager.create_session()
+
+    with pytest.raises(ExceptionGroup, match="Failed to fully shut down"):
+        await manager.shutdown()
+
+    assert telemetry.events == ["close"]
 
 
 @pytest.mark.asyncio

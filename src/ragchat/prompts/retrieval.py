@@ -15,8 +15,8 @@ qdrant_hybrid_search.\
 
 SEARCH_STRATEGY = """\
 ## Searching
-- Formulate a focused first query yourself; rephrase the question into the \
-terms most likely to appear in the documents.
+- Formulate a short first query yourself: use 3-8 words containing the most \
+specific terms likely to appear in the documents, rather than a full question.
 - After each search, judge for yourself whether the evidence is sufficient. \
 If a specific aspect is missing, run another, sharper query targeting it.
 - You have a hard budget of three searches per request; the tool refuses \

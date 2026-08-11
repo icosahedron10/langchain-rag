@@ -42,4 +42,13 @@ def _build_vllm_chat_model(settings: Settings) -> BaseChatModel:
         api_key=key,  # type: ignore[arg-type]  # Pydantic accepts and coerces str.
         async_client=client.chat.completions,
         root_async_client=client,
+        max_tokens=32_768,
+        temperature=0.7,
+        top_p=0.8,
+        presence_penalty=1.5,
+        extra_body={
+            "top_k": 20,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0
+        },
     )

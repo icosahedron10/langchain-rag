@@ -35,6 +35,7 @@ from ragchat.retrieval.qdrant import (
     build_vector_store,
     validate_corpus,
 )
+from ragchat.telemetry import Telemetry
 
 if TYPE_CHECKING:
     from ragchat.sandbox.backend import SessionSandboxHandle
@@ -163,6 +164,7 @@ class DeepAgentManager:
         self._components = components
         self._checkpointer = checkpointer
         self._sessions: dict[str, Session] = {}
+        self._telemetry = Telemetry(settings)
 
         factory = components.sandbox_handle_factory
         if settings.sandbox_mode is SandboxMode.DOCKER and factory is None:
@@ -223,23 +225,24 @@ class DeepAgentManager:
 
         async def event_stream() -> AsyncGenerator[DomainEvent, None]:
             try:
-                async for namespace, mode, payload in self._orchestrator.astream(
-                    {"messages": [HumanMessage(message)]},
-                    config={"configurable": {"thread_id": session_id}},
-                    stream_mode=["messages", "custom"],
-                    subgraphs=True,
-                ):
-                    if mode == "custom":
-                        yield _DOMAIN_EVENT_ADAPTER.validate_python(payload)
-                        continue
+                with self._telemetry.trace_chat(session_id):
+                    async for namespace, mode, payload in self._orchestrator.astream(
+                        {"messages": [HumanMessage(message)]},
+                        config={"configurable": {"thread_id": session_id}},
+                        stream_mode=["messages", "custom"],
+                        subgraphs=True,
+                    ):
+                        if mode == "custom":
+                            yield _DOMAIN_EVENT_ADAPTER.validate_python(payload)
+                            continue
 
-                    if mode != "messages" or namespace != ():
-                        continue
-                    chunk, _metadata = payload
-                    if isinstance(chunk, AIMessageChunk) and chunk.text:
-                        yield MessageDelta(text=chunk.text)
+                        if mode != "messages" or namespace != ():
+                            continue
+                        chunk, _metadata = payload
+                        if isinstance(chunk, AIMessageChunk) and chunk.text:
+                            yield MessageDelta(text=chunk.text)
 
-                yield DoneEvent()
+                    yield DoneEvent()
             except Exception:
                 yield ErrorEvent(message=STREAM_ERROR_MESSAGE)
 
@@ -269,6 +272,11 @@ class DeepAgentManager:
                 await self.delete_session(session_id)
             except Exception as exc:
                 failures.append(exc)
+
+        try:
+            self._telemetry.close()
+        except Exception as exc:
+            failures.append(exc)
 
         if failures:
             raise ExceptionGroup("Failed to fully shut down the agent manager", failures)

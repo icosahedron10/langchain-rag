@@ -95,6 +95,7 @@ async def test_model_chosen_query_emits_progress_before_search_and_builds_fresh_
     ]
     assert evidence.sources[0].evidence == "Exact corpus wording."
     assert len(create_calls) == 1
+    assert create_calls[0]["name"] == "ragchat_retrieval"
     assert create_calls[0]["checkpointer"] is False
     assert isinstance(create_calls[0]["response_format"], ToolStrategy)
     assert [tool.name for tool in create_calls[0]["tools"]] == ["qdrant_hybrid_search"]

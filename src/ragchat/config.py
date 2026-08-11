@@ -27,10 +27,10 @@ class Settings(BaseSettings):
 
     # Litestar bind address. Local single-user app: default to loopback.
     api_host: str = "127.0.0.1"
-    api_port: int = Field(default=8080, ge=1, le=65535)
+    api_port: int = Field(default=8081, ge=1, le=65535)
 
     # Streamlit client -> API base URL.
-    streamlit_api_url: str = "http://127.0.0.1:8080"
+    streamlit_api_url: str = "http://127.0.0.1:8081"
 
     # Model runtime. vLLM is the long-term default; OpenAI is a temporary,
     # removable startup option selected once before the API starts.
@@ -39,19 +39,25 @@ class Settings(BaseSettings):
     vllm_api_key: SecretStr = SecretStr("EMPTY")
     vllm_model: str | None = None
     openai_api_key: SecretStr | None = None
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-5.6-luna"
 
     # Qdrant: externally populated, read-only dependency.
     qdrant_url: str = "http://127.0.0.1:6333"
     qdrant_api_key: SecretStr | None = None
     qdrant_collection: str | None = None
-    qdrant_dense_vector_name: str = "dense"
-    qdrant_sparse_vector_name: str = "sparse"
+    qdrant_dense_vector_name: str = "sentence-transformers/all-mpnet-base-v2"
+    qdrant_sparse_vector_name: str = "Qdrant/bm25"
 
     # Retrieval models (must match the contract used to populate the collection).
     dense_embedding_model: str = "sentence-transformers/all-mpnet-base-v2"
     sparse_embedding_model: str = "Qdrant/bm25"
     reranker_model: str = "BAAI/bge-reranker-base"
+
+    # Optional LangSmith tracing.
+    langsmith_tracing: bool = False
+    langsmith_api_key: SecretStr | None = None
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_project: str | None = None
 
     # Optional Docker sandbox.
     sandbox_mode: SandboxMode = SandboxMode.DISABLED
@@ -80,6 +86,10 @@ class Settings(BaseSettings):
         elif self.model_backend is ModelBackend.OPENAI:
             if self.openai_api_key is None or not self.openai_api_key.get_secret_value():
                 problems.append("MODEL_BACKEND=openai requires OPENAI_API_KEY.")
+        if self.langsmith_tracing and (
+            self.langsmith_api_key is None or not self.langsmith_api_key.get_secret_value()
+        ):
+            problems.append("LANGSMITH_TRACING=true requires LANGSMITH_API_KEY.")
         if not self.qdrant_collection:
             problems.append(
                 "QDRANT_COLLECTION is required and must name an existing, "

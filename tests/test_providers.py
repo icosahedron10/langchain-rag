@@ -46,6 +46,7 @@ def fake_provider_modules(monkeypatch: pytest.MonkeyPatch) -> None:
 def vllm_settings() -> Settings:
     return Settings(
         vllm_base_url="http://vllm.test:8000/v1",
+        vllm_api_key="EMPTY",
         vllm_model="local-model",
         qdrant_collection="corpus",
         _env_file=None,
@@ -91,6 +92,16 @@ def test_vllm_injects_both_async_client_handles(
         "api_key": "EMPTY",
         "async_client": root_client.chat.completions,
         "root_async_client": root_client,
+        "max_tokens": 32_768,
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "presence_penalty": 1.5,
+        "extra_body": {
+            "top_k": 20,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
     }
 
 
@@ -146,5 +157,6 @@ def test_openai_backend_constructs_only_official_model_configuration(
     assert model.kwargs == {
         "model": "official-model",
         "api_key": "official-secret",
+        "reasoning": {"effort": "low"},
     }
     assert FakeAsyncOpenAI.calls == []

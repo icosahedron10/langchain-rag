@@ -20,4 +20,5 @@ def build_openai_chat_model(settings: Settings) -> BaseChatModel:
     return ChatOpenAI(
         model=settings.openai_model,
         api_key=settings.openai_api_key.get_secret_value(),  # type: ignore[arg-type]
+        reasoning={"effort": "low"},
     )

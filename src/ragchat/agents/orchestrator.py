@@ -22,6 +22,7 @@ def build_orchestrator(
     if sandbox_backend is None:
         return create_agent(
             model,
+            name="ragchat_orchestrator",
             tools=[search_corpus_tool],
             system_prompt=orchestrator_prompt(False),
             checkpointer=checkpointer,
@@ -31,6 +32,7 @@ def build_orchestrator(
 
     return create_agent(
         model,
+        name="ragchat_orchestrator",
         tools=[search_corpus_tool],
         system_prompt=orchestrator_prompt(True),
         middleware=[FilesystemMiddleware(backend=sandbox_backend)],

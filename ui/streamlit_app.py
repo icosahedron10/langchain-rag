@@ -17,7 +17,7 @@ import httpx
 import streamlit as st
 from httpx_sse import ServerSentEvent, connect_sse
 
-API_URL = os.environ.get("STREAMLIT_API_URL", "http://127.0.0.1:8080").rstrip("/")
+API_URL = os.environ.get("STREAMLIT_API_URL", "http://127.0.0.1:8667").rstrip("/")
 
 st.set_page_config(page_title="Corpus chat", page_icon="📚")
 

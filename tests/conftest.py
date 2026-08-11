@@ -7,6 +7,7 @@ import re
 from collections.abc import Iterator, Sequence
 from typing import Any, cast
 
+import pytest
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
@@ -14,6 +15,13 @@ from langchain_core.outputs import ChatGenerationChunk
 from pydantic import Field
 
 from ragchat.retrieval import RetrievedPassage
+
+
+@pytest.fixture(autouse=True)
+def disable_ambient_langsmith_tracing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.delenv("LANGCHAIN_TRACING", raising=False)
+    monkeypatch.delenv("LANGCHAIN_TRACING_V2", raising=False)
 
 
 class ScriptedChatModel(GenericFakeChatModel):

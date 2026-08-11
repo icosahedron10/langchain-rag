@@ -32,7 +32,8 @@ def test_retrieval_prompt_delegates_query_and_sufficiency_decisions_to_the_model
 
     assert "exactly one tool" in prompt
     assert "qdrant_hybrid_search" in prompt
-    assert "Formulate a focused first query yourself" in prompt
+    assert "use 3-8 words" in prompt
+    assert "rather than a full question" in prompt
     assert "judge for yourself whether the evidence is sufficient" in prompt
     assert "hard budget of three searches" in prompt
     assert "selected_point_ids" in prompt
