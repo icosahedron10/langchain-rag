@@ -15,6 +15,7 @@ def build_orchestrator(
     model: BaseChatModel,
     search_corpus_tool: BaseTool,
     checkpointer: Any,
+    corpus_description: str,
     sandbox_backend: Any | None = None,
 ) -> Any:
     """Build the same corpus orchestrator with optional sandbox middleware."""
@@ -24,7 +25,7 @@ def build_orchestrator(
             model,
             name="ragchat_orchestrator",
             tools=[search_corpus_tool],
-            system_prompt=orchestrator_prompt(False),
+            system_prompt=orchestrator_prompt(False, corpus_description),
             checkpointer=checkpointer,
         )
 
@@ -34,7 +35,7 @@ def build_orchestrator(
         model,
         name="ragchat_orchestrator",
         tools=[search_corpus_tool],
-        system_prompt=orchestrator_prompt(True),
+        system_prompt=orchestrator_prompt(True, corpus_description),
         middleware=[FilesystemMiddleware(backend=sandbox_backend)],
         checkpointer=checkpointer,
     )

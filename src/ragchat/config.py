@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://127.0.0.1:6333"
     qdrant_api_key: SecretStr | None = None
     qdrant_collection: str | None = None
+    # Injected into both system prompts: without it neither model can judge
+    # whether an incoming question is corpus-scoped.
+    corpus_description: str = (
+        "the Dungeons & Dragons 5th Edition System Reference Document 5.2.1 "
+        "(SRD_CC_v5.2.1.pdf), covering character classes, species, feats, "
+        "spells, equipment, and the core rules of play"
+    )
     qdrant_dense_vector_name: str = "sentence-transformers/all-mpnet-base-v2"
     qdrant_sparse_vector_name: str = "Qdrant/bm25"
 

@@ -18,6 +18,8 @@ from ragchat.agents.retrieval import (
 )
 from ragchat.retrieval import RetrievedPassage
 
+CORPUS_DESCRIPTION = "the tabletop rulebook corpus"
+
 
 def tool_call(name: str, arguments: dict[str, Any], call_id: str) -> AIMessage:
     return AIMessage(
@@ -78,7 +80,7 @@ async def test_model_chosen_query_emits_progress_before_search_and_builds_fresh_
 
     monkeypatch.setattr(retrieval_module, "create_agent", recording_create_agent)
 
-    raw_evidence = await build_search_corpus_tool(model, pipeline).ainvoke(
+    raw_evidence = await build_search_corpus_tool(model, pipeline, CORPUS_DESCRIPTION).ainvoke(
         {"question": "original user wording"}
     )
 
@@ -116,7 +118,9 @@ async def test_hard_search_cap_refuses_a_fourth_model_requested_search(
     pipeline = FakePipeline()
     monkeypatch.setattr(retrieval_module, "get_stream_writer", lambda: events.append)
 
-    await build_search_corpus_tool(model, pipeline).ainvoke({"question": "research this"})
+    await build_search_corpus_tool(model, pipeline, CORPUS_DESCRIPTION).ainvoke(
+        {"question": "research this"}
+    )
 
     assert pipeline.queries == queries[:MAX_SEARCHES]
     searching_events = [event for event in events if event["text"].startswith("Searching for:")]
@@ -155,7 +159,7 @@ async def test_search_budget_counter_is_fresh_per_invocation(
         return real_create_agent(*args, **kwargs)
 
     monkeypatch.setattr(retrieval_module, "create_agent", recording_create_agent)
-    search_tool = build_search_corpus_tool(model, pipeline)
+    search_tool = build_search_corpus_tool(model, pipeline, CORPUS_DESCRIPTION)
 
     await search_tool.ainvoke({"question": "first"})
     await search_tool.ainvoke({"question": "second"})
@@ -194,7 +198,7 @@ async def test_observed_passages_do_not_leak_between_invocations(
         )
     )
     monkeypatch.setattr(retrieval_module, "get_stream_writer", lambda: lambda _: None)
-    search_tool = build_search_corpus_tool(model, FirstRunOnlyPipeline())
+    search_tool = build_search_corpus_tool(model, FirstRunOnlyPipeline(), CORPUS_DESCRIPTION)
 
     first = CorpusEvidence.model_validate_json(await search_tool.ainvoke({"question": "first"}))
     second = CorpusEvidence.model_validate_json(await search_tool.ainvoke({"question": "second"}))
@@ -231,9 +235,9 @@ async def test_evidence_resolution_is_verbatim_and_unknown_ids_become_gaps(
     )
     monkeypatch.setattr(retrieval_module, "get_stream_writer", lambda: lambda _: None)
 
-    raw_evidence = await build_search_corpus_tool(model, FakePipeline([passage])).ainvoke(
-        {"question": "What is the policy?"}
-    )
+    raw_evidence = await build_search_corpus_tool(
+        model, FakePipeline([passage]), CORPUS_DESCRIPTION
+    ).ainvoke({"question": "What is the policy?"})
 
     evidence = CorpusEvidence.model_validate_json(raw_evidence)
     assert evidence.answerable is True
@@ -264,7 +268,9 @@ async def test_agent_exception_propagates_without_a_local_catch(
     model = ScriptedChatModel(messages=iter([]))
 
     with pytest.raises(RuntimeError, match="model runtime failed"):
-        await build_search_corpus_tool(model, FakePipeline()).ainvoke({"question": "question"})
+        await build_search_corpus_tool(model, FakePipeline(), CORPUS_DESCRIPTION).ainvoke(
+            {"question": "question"}
+        )
 
 
 @pytest.mark.asyncio

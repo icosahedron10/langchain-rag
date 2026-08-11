@@ -43,7 +43,9 @@ class CorpusEvidence(BaseModel):
     gaps: list[str]
 
 
-def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> BaseTool:
+def build_search_corpus_tool(
+    model: BaseChatModel, pipeline: SearchPipeline, corpus_description: str
+) -> BaseTool:
     """Build the orchestrator's sole corpus-search tool."""
 
     @tool
@@ -80,7 +82,7 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
             model,
             name="ragchat_retrieval",
             tools=[qdrant_hybrid_search],
-            system_prompt=retrieval_prompt(),
+            system_prompt=retrieval_prompt(corpus_description),
             response_format=ToolStrategy(RetrievalResult),
             checkpointer=False,
         )

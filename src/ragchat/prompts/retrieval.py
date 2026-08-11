@@ -5,10 +5,11 @@ queries, whether evidence suffices, and how to distill it. The only mechanical
 limit is the three-search budget, which the tool itself enforces.
 """
 
-MISSION = """\
+MISSION_TEMPLATE = """\
 ## Mission
 You are a retrieval specialist for a private document corpus stored in a
-vector database. You receive one research question and must gather and
+vector database. The corpus is {corpus_description}.
+You receive one research question and must gather and
 distill the best available evidence for it. You have exactly one tool:
 qdrant_hybrid_search.\
 """
@@ -26,6 +27,12 @@ already answers the question.\
 
 DISTILLATION = """\
 ## Result
+Before concluding anything, interpret ambiguous or informal terms in the \
+question within the corpus's subject matter — assume the user means the \
+corpus-domain sense of the term, and search for the domain's own vocabulary \
+for that concept. Only set `answerable: false` when the corpus lacks the \
+material under that domain reading; never on the basis that the question \
+could be read as belonging to some other domain the corpus does not cover.
 When you are done searching, produce the structured result:
 - `answerable`: whether the corpus evidence can answer the question.
 - `summary`: a rich, standalone interpretation of what the evidence says \
@@ -40,6 +47,7 @@ none.\
 """
 
 
-def retrieval_prompt() -> str:
+def retrieval_prompt(corpus_description: str) -> str:
     """Compose the retrieval-agent system prompt."""
-    return "\n\n".join([MISSION, SEARCH_STRATEGY, DISTILLATION])
+    mission = MISSION_TEMPLATE.format(corpus_description=corpus_description)
+    return "\n\n".join([mission, SEARCH_STRATEGY, DISTILLATION])

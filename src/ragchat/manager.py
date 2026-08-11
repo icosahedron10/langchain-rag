@@ -177,6 +177,7 @@ class DeepAgentManager:
         search_corpus = build_search_corpus_tool(
             components.chat_model,
             components.pipeline,
+            settings.corpus_description,
         )
         sandbox_backend = None
         if settings.sandbox_mode is SandboxMode.DOCKER:
@@ -188,6 +189,7 @@ class DeepAgentManager:
             components.chat_model,
             search_corpus,
             checkpointer,
+            settings.corpus_description,
             sandbox_backend,
         )
 

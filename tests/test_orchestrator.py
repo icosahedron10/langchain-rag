@@ -16,6 +16,8 @@ from conftest import ScriptedChatModel
 from ragchat.agents.orchestrator import build_orchestrator
 from ragchat.sandbox.backend import SessionRoutingBackend, SessionSandboxHandle
 
+CORPUS_DESCRIPTION = "the tabletop rulebook corpus"
+
 
 @tool
 async def search_corpus(question: str) -> str:
@@ -37,14 +39,14 @@ def test_disabled_mode_wires_only_search_without_importing_deepagents(
     model = ScriptedChatModel(messages=iter([]))
     checkpointer = object()
 
-    result = build_orchestrator(model, search_corpus, checkpointer)
+    result = build_orchestrator(model, search_corpus, checkpointer, CORPUS_DESCRIPTION)
 
     assert result is graph
     assert calls == [
         {
             "name": "ragchat_orchestrator",
             "tools": [search_corpus],
-            "system_prompt": orchestrator_module.orchestrator_prompt(False),
+            "system_prompt": orchestrator_module.orchestrator_prompt(False, CORPUS_DESCRIPTION),
             "checkpointer": checkpointer,
         }
     ]
@@ -84,12 +86,20 @@ def test_sandbox_mode_adds_one_filesystem_middleware_around_the_same_corpus_tool
     )
     backend = object()
 
-    build_orchestrator(ScriptedChatModel(messages=iter([])), search_corpus, False, backend)
+    build_orchestrator(
+        ScriptedChatModel(messages=iter([])),
+        search_corpus,
+        False,
+        CORPUS_DESCRIPTION,
+        backend,
+    )
 
     assert middleware_backends == [backend]
     assert calls[0]["tools"] == [search_corpus]
     assert calls[0]["name"] == "ragchat_orchestrator"
-    assert calls[0]["system_prompt"] == orchestrator_module.orchestrator_prompt(True)
+    assert calls[0]["system_prompt"] == orchestrator_module.orchestrator_prompt(
+        True, CORPUS_DESCRIPTION
+    )
     assert calls[0]["checkpointer"] is False
     assert len(calls[0]["middleware"]) == 1
 
@@ -97,7 +107,9 @@ def test_sandbox_mode_adds_one_filesystem_middleware_around_the_same_corpus_tool
 @pytest.mark.asyncio
 async def test_disabled_mode_exposes_exactly_one_tool_to_the_model() -> None:
     model = ScriptedChatModel(messages=iter([AIMessage(content="hello")]))
-    graph = build_orchestrator(model, search_corpus, checkpointer=False)
+    graph = build_orchestrator(
+        model, search_corpus, checkpointer=False, corpus_description=CORPUS_DESCRIPTION
+    )
 
     await graph.ainvoke({"messages": [HumanMessage("hi")]})
 
@@ -111,7 +123,13 @@ async def test_disabled_mode_exposes_exactly_one_tool_to_the_model() -> None:
 async def test_sandbox_mode_exposes_filesystem_tools_but_no_second_corpus_tool() -> None:
     model = ScriptedChatModel(messages=iter([AIMessage(content="hello")]))
     backend = SessionRoutingBackend(lambda _session_id: cast("SessionSandboxHandle", object()))
-    graph = build_orchestrator(model, search_corpus, checkpointer=False, sandbox_backend=backend)
+    graph = build_orchestrator(
+        model,
+        search_corpus,
+        checkpointer=False,
+        corpus_description=CORPUS_DESCRIPTION,
+        sandbox_backend=backend,
+    )
 
     await graph.ainvoke({"messages": [HumanMessage("hi")]})
 

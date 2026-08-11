@@ -145,25 +145,30 @@ async def test_create_uses_one_saver_and_the_same_model_for_both_agents(
     saver = RecordingSaver()
     tool = object()
     orchestrator = ScriptedOrchestrator()
-    search_calls: list[tuple[object, object]] = []
-    orchestrator_calls: list[tuple[object, object, object, object]] = []
+    search_calls: list[tuple[object, object, object]] = []
+    orchestrator_calls: list[tuple[object, object, object, object, object]] = []
     saver_builds: list[None] = []
 
     def build_saver() -> RecordingSaver:
         saver_builds.append(None)
         return saver
 
-    def build_search(received_model: object, received_pipeline: object) -> object:
-        search_calls.append((received_model, received_pipeline))
+    def build_search(
+        received_model: object, received_pipeline: object, corpus_description: str
+    ) -> object:
+        search_calls.append((received_model, received_pipeline, corpus_description))
         return tool
 
     def build_graph(
         received_model: object,
         received_tool: object,
         received_saver: object,
+        corpus_description: str,
         sandbox_backend: object,
     ) -> ScriptedOrchestrator:
-        orchestrator_calls.append((received_model, received_tool, received_saver, sandbox_backend))
+        orchestrator_calls.append(
+            (received_model, received_tool, received_saver, corpus_description, sandbox_backend)
+        )
         return orchestrator
 
     monkeypatch.setattr(manager_module, "InMemorySaver", build_saver)
@@ -174,8 +179,9 @@ async def test_create_uses_one_saver_and_the_same_model_for_both_agents(
 
     assert manager._orchestrator is orchestrator
     assert saver_builds == [None]
-    assert search_calls == [(model, pipeline)]
-    assert orchestrator_calls == [(model, tool, saver, None)]
+    configured = settings()
+    assert search_calls == [(model, pipeline, configured.corpus_description)]
+    assert orchestrator_calls == [(model, tool, saver, configured.corpus_description, None)]
 
 
 @pytest.mark.parametrize(
