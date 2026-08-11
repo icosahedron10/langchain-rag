@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 import tempfile
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -23,9 +25,12 @@ from ragchat.domain import (
     DoneEvent,
     ErrorEvent,
     MessageDelta,
+    ProgressEvent,
+    RetrievedSourcesEvent,
     SessionBusyError,
     SessionNotFoundError,
     StartupValidationError,
+    UnverifiableCitationEvent,
 )
 from ragchat.providers import build_chat_model
 from ragchat.retrieval import HybridSearchPipeline, SearchPipeline
@@ -43,7 +48,46 @@ if TYPE_CHECKING:
 
 STREAM_ERROR_MESSAGE = "An unexpected error occurred while processing your request."
 
+CITATION_RETRY_NOTICE = "Rechecking the answer's citations against the retrieved sources…"
+
 _DOMAIN_EVENT_ADAPTER: TypeAdapter[DomainEvent] = TypeAdapter(DomainEvent)
+
+_LOGGER = logging.getLogger(__name__)
+
+# (guide.pdf, p. 12) and (guide.pdf, pp. 12, 13) as instructed by the prompts.
+_CITATION_PATTERN = re.compile(r"\(([^(),]+),\s*pp?\.\s*(\d+(?:\s*,\s*\d+)*)\)")
+
+
+def _document_key(document: str) -> str:
+    return PurePosixPath(document.strip()).name.casefold()
+
+
+def _cited_pages(answer: str) -> set[tuple[str, int]]:
+    """Parse every (document, page) pair the answer text cites."""
+
+    return {
+        (_document_key(document), int(page))
+        for document, pages in _CITATION_PATTERN.findall(answer)
+        for page in re.findall(r"\d+", pages)
+    }
+
+
+def _unverifiable_citations(answer: str, retrieved: set[tuple[str, int]]) -> list[str]:
+    """Render the answer's citations that no source retrieved this turn supports."""
+
+    return sorted(
+        f"({document}, p. {page})"
+        for document, page in _cited_pages(answer)
+        if (document, page) not in retrieved
+    )
+
+
+def _citation_correction_request(citations: list[str]) -> str:
+    return (
+        "Your previous answer cited pages that appear in no `sources` entry returned "
+        f"this turn: {', '.join(citations)}. Rewrite the answer using only pages that "
+        "appear in this turn's `sources`, and drop any claim they do not support."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,27 +270,71 @@ class DeepAgentManager:
         async def event_stream() -> AsyncGenerator[DomainEvent, None]:
             try:
                 with self._telemetry.trace_chat(session_id):
-                    async for namespace, mode, payload in self._orchestrator.astream(
-                        {"messages": [HumanMessage(message)]},
-                        config={"configurable": {"thread_id": session_id}},
-                        stream_mode=["messages", "custom"],
-                        subgraphs=True,
-                    ):
-                        if mode == "custom":
-                            yield _DOMAIN_EVENT_ADAPTER.validate_python(payload)
-                            continue
+                    retrieved: set[tuple[str, int]] = set()
+                    answer: list[str] = []
+                    async for event in self._stream_turn(session_id, message, retrieved, answer):
+                        yield event
 
-                        if mode != "messages" or namespace != ():
-                            continue
-                        chunk, _metadata = payload
-                        if isinstance(chunk, AIMessageChunk) and chunk.text:
-                            yield MessageDelta(text=chunk.text)
+                    unverifiable = _unverifiable_citations("".join(answer), retrieved)
+                    if unverifiable and self._settings.citation_strict_mode:
+                        yield ProgressEvent(text=CITATION_RETRY_NOTICE)
+                        answer.clear()
+                        async for event in self._stream_turn(
+                            session_id,
+                            _citation_correction_request(unverifiable),
+                            retrieved,
+                            answer,
+                        ):
+                            yield event
+                        unverifiable = _unverifiable_citations("".join(answer), retrieved)
+
+                    self._telemetry.record_citation_check(unverifiable=bool(unverifiable))
+                    if unverifiable:
+                        _LOGGER.warning(
+                            "Session %s answered with citations absent from this turn's "
+                            "sources: %s",
+                            session_id,
+                            ", ".join(unverifiable),
+                        )
+                        yield UnverifiableCitationEvent(citations=unverifiable)
 
                     yield DoneEvent()
             except Exception:
                 yield ErrorEvent(message=STREAM_ERROR_MESSAGE)
 
         return SessionEventStream(event_stream(), session.lock)
+
+    async def _stream_turn(
+        self,
+        session_id: str,
+        message: str,
+        retrieved: set[tuple[str, int]],
+        answer: list[str],
+    ) -> AsyncGenerator[DomainEvent, None]:
+        """Stream one orchestrator turn, collecting its retrieved pages and answer text."""
+
+        async for namespace, mode, payload in self._orchestrator.astream(
+            {"messages": [HumanMessage(message)]},
+            config={"configurable": {"thread_id": session_id}},
+            stream_mode=["messages", "custom"],
+            subgraphs=True,
+        ):
+            if mode == "custom":
+                event = _DOMAIN_EVENT_ADAPTER.validate_python(payload)
+                if isinstance(event, RetrievedSourcesEvent):
+                    retrieved.update(
+                        (_document_key(document), page) for document, page in event.pages
+                    )
+                    continue
+                yield event
+                continue
+
+            if mode != "messages" or namespace != ():
+                continue
+            chunk, _metadata = payload
+            if isinstance(chunk, AIMessageChunk) and chunk.text:
+                answer.append(chunk.text)
+                yield MessageDelta(text=chunk.text)
 
     async def delete_session(self, session_id: str) -> None:
         """Destroy a non-busy session and remove all of its checkpoints."""

@@ -27,6 +27,16 @@ def test_orchestrator_prompt_pins_grounding_citations_and_gap_reporting() -> Non
     assert "Never guess" in prompt
 
 
+def test_orchestrator_prompt_forbids_pages_outside_this_turn_and_backfilled_entries() -> None:
+    prompt = orchestrator_prompt(False)
+
+    assert "that exact page appears in a `sources` entry returned during this turn" in prompt
+    assert "does not contain the entry the user asked about, say so and stop" in prompt
+    assert "features, traits, or mechanics from general knowledge" in prompt
+    assert '"assuming the usual X"' in prompt
+    assert '"the commonly known X features are"' in prompt
+
+
 def test_retrieval_prompt_delegates_query_and_sufficiency_decisions_to_the_model() -> None:
     prompt = retrieval_prompt()
 

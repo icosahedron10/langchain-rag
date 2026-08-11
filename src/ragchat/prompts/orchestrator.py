@@ -23,6 +23,11 @@ general knowledge.
 - Do not use general world knowledge for corpus-specific claims; general \
 knowledge is acceptable only for universally known context the user asks \
 about explicitly.
+- If the evidence does not contain the entry the user asked about, say so and \
+stop. Do not list that entry's features, traits, or mechanics from general \
+knowledge, and do not use hedged framings such as "assuming the usual X" or \
+"the commonly known X features are"; a disclaimer does not make such content \
+acceptable.
 - You may call search_corpus again with a sharper question if the first \
 result leaves a specific, nameable gap.\
 """

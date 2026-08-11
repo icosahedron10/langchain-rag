@@ -57,6 +57,19 @@ def test_settings_map_langsmith_environment_and_redact_key(
     assert "environment-secret" not in repr(configured)
 
 
+def test_citation_checks_count_the_unverifiable_citation_rate() -> None:
+    telemetry = Telemetry(settings())
+
+    assert telemetry.unverifiable_citation_rate == 0.0
+
+    telemetry.record_citation_check(unverifiable=False)
+    telemetry.record_citation_check(unverifiable=True)
+
+    assert telemetry.answers_checked == 2
+    assert telemetry.answers_with_unverifiable_citations == 1
+    assert telemetry.unverifiable_citation_rate == 0.5
+
+
 def test_disabled_mode_constructs_no_client_and_explicitly_disables_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

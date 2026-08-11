@@ -52,7 +52,8 @@ For a chat turn, the controller asks the manager for an event iterator before
 constructing the SSE response, so unknown and overlapping sessions become 404
 and 409 responses. The manager invokes the orchestrator with
 `thread_id == session_id`, then serializes only domain events through the
-controller as `progress`, `message`, `artifact`, `done`, or `error` SSE events.
+controller as `progress`, `message`, `artifact`, `unverifiable_citation`,
+`done`, or `error` SSE events.
 Unexpected runtime errors become a generic public error rather than leaking
 prompts, credentials, scores, or internals.
 
@@ -115,6 +116,15 @@ during that invocation and inserts the original `page_content` verbatim with
 source and page. Unknown IDs are dropped and reported as gaps. The orchestrator
 is instructed to verify every claim against this evidence rather than trust the
 retrieval summary.
+
+Prompt discipline alone cannot guarantee that the answer's citations point at
+retrieved pages, so `search_corpus` publishes every resolved document/page pair
+as an internal `retrieved_sources` custom event. The manager accumulates those
+pairs and the streamed answer text, parses `(document, p. N)` and `pp. N, M`
+citations once the turn ends, and emits an `unverifiable_citation` event plus a
+warning log and a telemetry counter for every cited page the turn never
+retrieved. `CITATION_STRICT_MODE=true` additionally re-prompts the orchestrator
+once, naming the offending citations, before the final check.
 
 ## Sessions, checkpoints, and optional sandbox
 

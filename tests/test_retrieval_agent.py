@@ -92,6 +92,7 @@ async def test_model_chosen_query_emits_progress_before_search_and_builds_fresh_
         ("search", "model-authored embedding query"),
         {"type": "progress", "text": "Reviewing the retrieved passages…"},
         {"type": "progress", "text": "Preparing an evidence-grounded answer…"},
+        {"type": "retrieved_sources", "pages": [("manual.pdf", 4)]},
     ]
     assert evidence.sources[0].evidence == "Exact corpus wording."
     assert len(create_calls) == 1
@@ -119,7 +120,9 @@ async def test_hard_search_cap_refuses_a_fourth_model_requested_search(
     await build_search_corpus_tool(model, pipeline).ainvoke({"question": "research this"})
 
     assert pipeline.queries == queries[:MAX_SEARCHES]
-    searching_events = [event for event in events if event["text"].startswith("Searching for:")]
+    searching_events = [
+        event for event in events if event.get("text", "").startswith("Searching for:")
+    ]
     assert len(searching_events) == MAX_SEARCHES
     assert all(queries[-1] not in event["text"] for event in searching_events)
 
@@ -249,6 +252,33 @@ async def test_evidence_resolution_is_verbatim_and_unknown_ids_become_gaps(
     assert evidence.gaps[0] == "The date remains unclear."
     assert "invented-id" in evidence.gaps[1]
     assert "invented-id" not in {source.point_id for source in evidence.sources}
+
+
+@pytest.mark.asyncio
+async def test_resolved_pages_are_published_for_citation_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    passages = [
+        RetrievedPassage("paged", "documents/policy.pdf", 12, "Paged evidence."),
+        RetrievedPassage("unpaged", "documents/policy.pdf", None, "Unpaged evidence."),
+    ]
+    events: list[dict[str, Any]] = []
+    model = ScriptedChatModel(
+        messages=iter(
+            [
+                tool_call("qdrant_hybrid_search", {"query": "policy terms"}, "search"),
+                retrieval_result(selected_point_ids=["paged", "unpaged", "invented-id"]),
+            ]
+        )
+    )
+    monkeypatch.setattr(retrieval_module, "get_stream_writer", lambda: events.append)
+
+    await build_search_corpus_tool(model, FakePipeline(passages)).ainvoke(
+        {"question": "What is the policy?"}
+    )
+
+    published = [event for event in events if event["type"] == "retrieved_sources"]
+    assert published == [{"type": "retrieved_sources", "pages": [("documents/policy.pdf", 12)]}]
 
 
 @pytest.mark.asyncio

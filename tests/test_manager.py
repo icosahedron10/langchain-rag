@@ -23,17 +23,28 @@ from ragchat.domain import (
     SessionBusyError,
     SessionNotFoundError,
     StartupValidationError,
+    UnverifiableCitationEvent,
 )
-from ragchat.manager import STREAM_ERROR_MESSAGE, DeepAgentManager, RuntimeComponents
+from ragchat.manager import (
+    CITATION_RETRY_NOTICE,
+    STREAM_ERROR_MESSAGE,
+    DeepAgentManager,
+    RuntimeComponents,
+)
 from ragchat.retrieval import RetrievedPassage
 
 
-def settings(*, sandbox_mode: SandboxMode = SandboxMode.DISABLED) -> Settings:
+def settings(
+    *,
+    sandbox_mode: SandboxMode = SandboxMode.DISABLED,
+    citation_strict_mode: bool = False,
+) -> Settings:
     return Settings(
         vllm_base_url="http://vllm.test/v1",
         vllm_model="test-model",
         qdrant_collection="test-corpus",
         sandbox_mode=sandbox_mode,
+        citation_strict_mode=citation_strict_mode,
         _env_file=None,
     )
 
@@ -82,6 +93,10 @@ class ScriptedOrchestrator:
 class RecordingTelemetry:
     def __init__(self) -> None:
         self.events: list[tuple[str, str] | str] = []
+        self.citation_checks: list[bool] = []
+
+    def record_citation_check(self, *, unverifiable: bool) -> None:
+        self.citation_checks.append(unverifiable)
 
     @contextmanager
     def trace_chat(self, session_id: str) -> Any:
@@ -112,11 +127,30 @@ class RecordingHandle:
     session: RecordingSandboxSession
 
 
+class MultiTurnOrchestrator:
+    def __init__(self, turns: list[list[Any]]) -> None:
+        self.turns = turns
+        self.calls: list[dict[str, Any]] = []
+
+    async def astream(
+        self,
+        input_value: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        stream_mode: list[str],
+        subgraphs: bool,
+    ) -> AsyncIterator[tuple[tuple[str, ...], str, Any]]:
+        self.calls.append({"input": input_value, "config": config})
+        for item in self.turns[len(self.calls) - 1]:
+            yield item
+
+
 def make_manager(
     monkeypatch: pytest.MonkeyPatch,
-    orchestrator: ScriptedOrchestrator,
+    orchestrator: Any,
     *,
     sandbox_mode: SandboxMode = SandboxMode.DISABLED,
+    citation_strict_mode: bool = False,
     handle_factory: Callable[[str], Any] | None = None,
     saver: RecordingSaver | None = None,
 ) -> DeepAgentManager:
@@ -129,7 +163,7 @@ def make_manager(
     monkeypatch.setattr(manager_module, "build_search_corpus_tool", lambda *_: object())
     monkeypatch.setattr(manager_module, "build_orchestrator", lambda *_: orchestrator)
     return DeepAgentManager(
-        settings(sandbox_mode=sandbox_mode),
+        settings(sandbox_mode=sandbox_mode, citation_strict_mode=citation_strict_mode),
         components,
         cast("Any", saver or RecordingSaver()),
     )
@@ -444,6 +478,106 @@ async def test_invalid_custom_payload_becomes_generic_error(
 
     assert events == [ErrorEvent(message=STREAM_ERROR_MESSAGE)]
     assert manager._sessions[session_id].lock.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_answer_citing_only_retrieved_pages_is_not_flagged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = ScriptedOrchestrator(
+        [
+            (
+                ("tools:search",),
+                "custom",
+                {"type": "retrieved_sources", "pages": [["documents/guide.pdf", 12]]},
+            ),
+            ((), "messages", (AIMessageChunk(content="The rule is X (guide.pdf, p. 12)."), {})),
+        ]
+    )
+    manager = make_manager(monkeypatch, orchestrator)
+    session_id = manager.create_session()
+
+    events = [event async for event in await manager.stream_chat(session_id, "what is the rule?")]
+
+    assert events == [
+        MessageDelta(text="The rule is X (guide.pdf, p. 12)."),
+        DoneEvent(),
+    ]
+    assert manager._telemetry.answers_with_unverifiable_citations == 0
+
+
+@pytest.mark.asyncio
+async def test_answer_citing_a_page_outside_this_turn_emits_unverifiable_citation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = ScriptedOrchestrator(
+        [
+            (
+                ("tools:search",),
+                "custom",
+                {"type": "retrieved_sources", "pages": [["documents/guide.pdf", 12]]},
+            ),
+            (
+                (),
+                "messages",
+                (
+                    AIMessageChunk(
+                        content=(
+                            "Assuming the usual traits (guide.pdf, pp. 12, 13) "
+                            "and (bestiary.pdf, p. 4)."
+                        )
+                    ),
+                    {},
+                ),
+            ),
+        ]
+    )
+    manager = make_manager(monkeypatch, orchestrator)
+    session_id = manager.create_session()
+
+    events = [event async for event in await manager.stream_chat(session_id, "what is the rule?")]
+
+    assert events[-2:] == [
+        UnverifiableCitationEvent(citations=["(bestiary.pdf, p. 4)", "(guide.pdf, p. 13)"]),
+        DoneEvent(),
+    ]
+    assert manager._telemetry.answers_with_unverifiable_citations == 1
+    assert manager._telemetry.unverifiable_citation_rate == 1.0
+
+
+@pytest.mark.asyncio
+async def test_strict_mode_reprompts_once_naming_the_unverifiable_citation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = MultiTurnOrchestrator(
+        [
+            [
+                (
+                    ("tools:search",),
+                    "custom",
+                    {"type": "retrieved_sources", "pages": [["guide.pdf", 12]]},
+                ),
+                ((), "messages", (AIMessageChunk(content="Also (bestiary.pdf, p. 4)."), {})),
+            ],
+            [((), "messages", (AIMessageChunk(content="Only (guide.pdf, p. 12)."), {}))],
+        ]
+    )
+    manager = make_manager(monkeypatch, orchestrator, citation_strict_mode=True)
+    session_id = manager.create_session()
+
+    events = [event async for event in await manager.stream_chat(session_id, "what is the rule?")]
+
+    assert events == [
+        MessageDelta(text="Also (bestiary.pdf, p. 4)."),
+        ProgressEvent(text=CITATION_RETRY_NOTICE),
+        MessageDelta(text="Only (guide.pdf, p. 12)."),
+        DoneEvent(),
+    ]
+    assert len(orchestrator.calls) == 2
+    retry_message = orchestrator.calls[1]["input"]["messages"][0]
+    assert isinstance(retry_message, HumanMessage)
+    assert "(bestiary.pdf, p. 4)" in retry_message.content
+    assert manager._telemetry.answers_with_unverifiable_citations == 0
 
 
 @pytest.mark.asyncio

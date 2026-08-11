@@ -110,6 +110,16 @@ def build_search_corpus_tool(model: BaseChatModel, pipeline: SearchPipeline) -> 
             unresolved = ", ".join(dict.fromkeys(unknown_ids))
             gaps.append(f"Unresolvable citations: point IDs were not observed: {unresolved}")
 
+        # The manager validates the answer's citations against these pairs.
+        get_stream_writer()(
+            {
+                "type": "retrieved_sources",
+                "pages": [
+                    (source.document, source.page) for source in sources if source.page is not None
+                ],
+            }
+        )
+
         evidence = CorpusEvidence(
             answerable=structured.answerable,
             summary=structured.summary,

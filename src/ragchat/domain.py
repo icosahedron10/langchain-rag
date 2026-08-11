@@ -35,6 +35,20 @@ class ArtifactEvent(BaseModel):
     data: str  # base64-encoded file content
 
 
+class RetrievedSourcesEvent(BaseModel):
+    """Document/page pairs resolved for one turn. Consumed by the manager only."""
+
+    type: Literal["retrieved_sources"] = "retrieved_sources"
+    pages: list[tuple[str, int]]
+
+
+class UnverifiableCitationEvent(BaseModel):
+    """Answer citations whose page appears in no source retrieved this turn."""
+
+    type: Literal["unverifiable_citation"] = "unverifiable_citation"
+    citations: list[str]
+
+
 class DoneEvent(BaseModel):
     type: Literal["done"] = "done"
 
@@ -45,7 +59,13 @@ class ErrorEvent(BaseModel):
 
 
 DomainEvent = Annotated[
-    ProgressEvent | MessageDelta | ArtifactEvent | DoneEvent | ErrorEvent,
+    ProgressEvent
+    | MessageDelta
+    | ArtifactEvent
+    | RetrievedSourcesEvent
+    | UnverifiableCitationEvent
+    | DoneEvent
+    | ErrorEvent,
     Field(discriminator="type"),
 ]
 

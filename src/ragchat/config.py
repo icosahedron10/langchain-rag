@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     sparse_embedding_model: str = "Qdrant/bm25"
     reranker_model: str = "BAAI/bge-reranker-base"
 
+    # Citation validation. Flagging is always on; strict mode also re-prompts the
+    # orchestrator once, naming the citations it could not verify.
+    citation_strict_mode: bool = False
+
     # Optional LangSmith tracing.
     langsmith_tracing: bool = False
     langsmith_api_key: SecretStr | None = None

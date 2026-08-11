@@ -14,6 +14,8 @@ class Telemetry:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._closed = False
+        self.answers_checked = 0
+        self.answers_with_unverifiable_citations = 0
         self._client = (
             Client(
                 api_url=settings.langsmith_endpoint,
@@ -31,6 +33,19 @@ class Telemetry:
             enabled=self._client is not None,
             client=self._client,
         )
+
+    def record_citation_check(self, *, unverifiable: bool) -> None:
+        """Count one checked answer and whether its citations were verifiable."""
+
+        self.answers_checked += 1
+        if unverifiable:
+            self.answers_with_unverifiable_citations += 1
+
+    @property
+    def unverifiable_citation_rate(self) -> float:
+        if self.answers_checked == 0:
+            return 0.0
+        return self.answers_with_unverifiable_citations / self.answers_checked
 
     def close(self) -> None:
         if self._client is not None and not self._closed:
